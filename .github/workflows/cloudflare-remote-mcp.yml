@@ -1,0 +1,29 @@
+name: Cloudflare remote MCP validation
+
+on:
+  push:
+    branches:
+      - cloudflare-remote-mcp
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # npm 10.9.8 hit an Arborist edgesOut crash while regenerating this
+      # branch's dependency tree. Keep the validated npm release explicit.
+      - name: Use validated npm release
+        run: npm install --global npm@11.19.1
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run worker:typecheck
+      - run: npm test
+      - run: npx wrangler deploy --dry-run
