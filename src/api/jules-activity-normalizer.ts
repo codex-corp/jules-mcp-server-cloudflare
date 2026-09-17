@@ -167,6 +167,28 @@ function normalizeProgressMessage(activity: JulesActivityDto): string | undefine
 }
 
 /**
+ * Jules has occasionally surfaced internal-looking channel text inside
+ * agentMessaged, for example a value beginning with "闸thought". Do not forward
+ * that trace text to MCP consumers. If Jules also includes an explicit final
+ * channel marker, preserve only the user-facing text after that marker.
+ */
+function sanitizeAgentMessage(message: string | undefined): string | undefined {
+  if (!message) return undefined;
+
+  const finalMarker = /(?:^|\n)\s*闸final\s*(?:\n|$)/i.exec(message);
+  if (finalMarker) {
+    const visible = message.slice(finalMarker.index + finalMarker[0].length).trim();
+    return visible || undefined;
+  }
+
+  if (/^\s*闸(?:thought|analysis)\b/i.test(message)) {
+    return undefined;
+  }
+
+  return message;
+}
+
+/**
  * Convert Jules' current Activity DTO to the stable activity shape consumed by
  * MCP tools. This keeps upstream response changes out of the public MCP contract.
  */
@@ -176,8 +198,9 @@ export function normalizeJulesActivity(activity: JulesActivityDto): Activity {
   const plan = formatPlan(activity.planGenerated?.plan);
   const progressMessage = normalizeProgressMessage(activity);
   const userMessage = activity.userMessaged?.userMessage;
-  const agentMessage =
-    activity.agentMessaged?.agentMessage ?? activity.agentMessaged?.message;
+  const agentMessage = sanitizeAgentMessage(
+    activity.agentMessaged?.agentMessage ?? activity.agentMessaged?.message
+  );
   const failureReason = activity.sessionFailed?.reason;
 
   const firstMedia = activity.artifacts?.find((artifact) => artifact.media)?.media;
