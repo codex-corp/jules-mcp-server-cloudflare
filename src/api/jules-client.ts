@@ -476,8 +476,10 @@ export class JulesClient {
   }
 
   /**
-   * Fetch activities at or after a Jules createTime range cursor. Jules' current
-   * API accepts the timestamp directly as the createTime query parameter.
+   * Return activities newer than the supplied timestamp. The live Jules v1alpha
+   * API currently rejects createTime as a query parameter, even though an example
+   * in the public docs shows it. Use the supported pageSize/pageToken contract,
+   * normalize all fetched pages, then filter locally by activity timestamp.
    */
   async listActivitiesSince(
     sessionId: string,
@@ -485,22 +487,60 @@ export class JulesClient {
     pageSize = 50
   ): Promise<ListActivitiesResponse> {
     const endpoint = `/sessions/${sessionId}/activities`;
+    const sinceTime = Date.parse(since);
+    if (!Number.isFinite(sinceTime)) {
+      throw new JulesAPIError('Invalid activity since timestamp.', 400);
+    }
+
+    const upstreamPageSize = 100;
+    const maxScanPages = 20;
+    const matchingActivities: Activity[] = [];
+    let pageToken: string | undefined;
+    let pagesScanned = 0;
+
     try {
-      const response = await this.request<ListActivitiesDto>(
-        `${endpoint}${this.buildQuery({
-          pageSize,
-          createTime: since,
-        })}`
-      );
+      do {
+        if (pagesScanned >= maxScanPages) {
+          throw new JulesAPIError(
+            `Activity history exceeded the bounded scan limit of ${maxScanPages * upstreamPageSize} activities.`
+          );
+        }
+
+        const response = await this.request<ListActivitiesDto>(
+          `${endpoint}${this.buildQuery({
+            pageSize: upstreamPageSize,
+            pageToken,
+          })}`
+        );
+        pagesScanned++;
+
+        for (const rawActivity of response.activities ?? []) {
+          const activity = normalizeJulesActivity(rawActivity);
+          const activityTime = activity.timestamp
+            ? Date.parse(activity.timestamp)
+            : Number.NaN;
+          if (Number.isFinite(activityTime) && activityTime > sinceTime) {
+            matchingActivities.push(activity);
+          }
+        }
+
+        pageToken = response.nextPageToken;
+      } while (pageToken);
+
+      matchingActivities.sort((left, right) => {
+        const leftTime = left.timestamp ? Date.parse(left.timestamp) : 0;
+        const rightTime = right.timestamp ? Date.parse(right.timestamp) : 0;
+        return leftTime - rightTime;
+      });
+
       return {
-        activities: (response.activities ?? []).map(normalizeJulesActivity),
-        nextPageToken: response.nextPageToken,
+        activities: matchingActivities.slice(0, pageSize),
       };
     } catch (error) {
       this.logActivityFailure(
         'listActivitiesSince',
         endpoint,
-        { sessionId, since, pageSize },
+        { sessionId, since, pageSize, pagesScanned },
         error
       );
       throw error;
