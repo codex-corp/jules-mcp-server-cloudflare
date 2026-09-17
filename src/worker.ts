@@ -24,6 +24,13 @@ interface WorkerExecutionContext {
 
 const VERSION = '1.0.0';
 const DEFAULT_PAGE_SIZE = 20;
+const MAX_SESSION_TITLE_LENGTH = 160;
+const MAX_SESSION_PROMPT_LENGTH = 4000;
+const MAX_ACTIVITY_SUMMARY_LENGTH = 500;
+const MAX_ACTIVITY_PLAN_LENGTH = 4000;
+const MAX_MEDIA_DESCRIPTION_LENGTH = 500;
+const MAX_PULL_REQUESTS = 20;
+const MAX_CHANGED_FILES = 50;
 
 const sessionIdSchema = z
   .string()
@@ -97,21 +104,33 @@ const getActivitiesSinceSchema = {
   page_size: z.number().int().min(1).max(200).default(DEFAULT_PAGE_SIZE),
 };
 
-const sessionSummaryOutputSchema = z.object({
-  name: z.string(),
+const sessionListItemOutputSchema = z.object({
   id: z.string(),
   title: z.string().optional(),
   state: z.string().optional(),
   source: z.string().optional(),
   branch: z.string().optional(),
-  promptPreview: z.string().optional(),
-  createTime: z.string().optional(),
+  updateTime: z.string().optional(),
+});
+
+const sessionStatusValueOutputSchema = z.object({
+  id: z.string(),
+  state: z.string().optional(),
   updateTime: z.string().optional(),
   monitorUrl: z.string(),
 });
 
-const sessionDetailsOutputSchema = sessionSummaryOutputSchema.extend({
+const sessionDetailsOutputSchema = z.object({
+  id: z.string(),
+  title: z.string().optional(),
+  state: z.string().optional(),
+  source: z.string().optional(),
+  branch: z.string().optional(),
+  createTime: z.string().optional(),
+  updateTime: z.string().optional(),
+  monitorUrl: z.string(),
   prompt: z.string(),
+  promptTruncated: z.boolean(),
   automationMode: z.string().optional(),
   requirePlanApproval: z.boolean().optional(),
   pullRequests: z.array(
@@ -181,12 +200,18 @@ const createSessionOutputSchema = z.object({
 
 const listSessionsOutputSchema = z.object({
   success: z.boolean(),
-  sessions: z.array(sessionSummaryOutputSchema).optional(),
+  sessions: z.array(sessionListItemOutputSchema).optional(),
   nextPageToken: z.string().optional(),
   error: toolErrorSchema.optional(),
 });
 
 const sessionStatusOutputSchema = z.object({
+  success: z.boolean(),
+  session: sessionStatusValueOutputSchema.optional(),
+  error: toolErrorSchema.optional(),
+});
+
+const sessionDetailsToolOutputSchema = z.object({
   success: z.boolean(),
   session: sessionDetailsOutputSchema.optional(),
   error: toolErrorSchema.optional(),
@@ -195,7 +220,7 @@ const sessionStatusOutputSchema = z.object({
 const manageSessionOutputSchema = z.object({
   success: z.boolean(),
   action: z.enum(['approve_plan', 'send_message', 'reject_plan']).optional(),
-  session: sessionDetailsOutputSchema.optional(),
+  session: sessionStatusValueOutputSchema.optional(),
   sessionId: z.string().optional(),
   state: z.string().optional(),
   error: toolErrorSchema.optional(),
@@ -261,39 +286,65 @@ const DESTRUCTIVE_WRITE_ANNOTATIONS = {
   openWorldHint: true,
 } as const;
 
-function truncateText(value: string | undefined, maxLength: number): string | undefined {
+function truncateText(
+  value: string | undefined,
+  maxLength: number
+): string | undefined {
   if (!value) return value;
   if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength)}…`;
+  if (maxLength <= 1) return '…'.slice(0, maxLength);
+  return `${value.slice(0, maxLength - 1)}…`;
 }
 
-function summarizeSession(session: Session) {
+function sessionMonitorUrl(session: Session): string {
+  return session.url || `https://jules.google.com/sessions/${session.id}`;
+}
+
+function sessionListItem(session: Session) {
   return {
-    name: session.name || `sessions/${session.id}`,
     id: session.id,
-    title: session.title,
+    title: truncateText(session.title, MAX_SESSION_TITLE_LENGTH),
     state: session.state,
     source: session.sourceContext?.source,
     branch: session.sourceContext?.githubRepoContext?.startingBranch,
-    promptPreview: truncateText(session.prompt, 500),
-    createTime: session.createTime,
     updateTime: session.updateTime,
-    monitorUrl: session.url || `https://jules.google.com/sessions/${session.id}`,
+  };
+}
+
+function sessionStatus(session: Session) {
+  return {
+    id: session.id,
+    state: session.state,
+    updateTime: session.updateTime,
+    monitorUrl: sessionMonitorUrl(session),
   };
 }
 
 function sessionDetails(session: Session) {
+  const prompt = session.prompt ?? '';
   const pullRequests = (session.outputs ?? [])
     .map((output) => output.pullRequest)
-    .filter((pullRequest): pullRequest is NonNullable<typeof pullRequest> => Boolean(pullRequest))
+    .filter(
+      (pullRequest): pullRequest is NonNullable<typeof pullRequest> =>
+        Boolean(pullRequest)
+    )
+    .slice(0, MAX_PULL_REQUESTS)
     .map((pullRequest) => ({
       url: pullRequest.url,
-      title: pullRequest.title,
+      title: truncateText(pullRequest.title, MAX_SESSION_TITLE_LENGTH),
     }));
 
   return {
-    ...summarizeSession(session),
-    prompt: truncateText(session.prompt, 5000) ?? '',
+    id: session.id,
+    title: truncateText(session.title, MAX_SESSION_TITLE_LENGTH),
+    state: session.state,
+    source: session.sourceContext?.source,
+    branch: session.sourceContext?.githubRepoContext?.startingBranch,
+    createTime: session.createTime,
+    updateTime: session.updateTime,
+    monitorUrl: sessionMonitorUrl(session),
+    prompt: truncateText(prompt, MAX_SESSION_PROMPT_LENGTH) ?? '',
+    promptTruncated: prompt.length > MAX_SESSION_PROMPT_LENGTH,
     automationMode: session.automationMode,
     requirePlanApproval: session.requirePlanApproval,
     pullRequests,
@@ -324,14 +375,23 @@ function summarizeActivity(activity: Activity) {
   const changedFiles = (changeSet?.changes ?? [])
     .map((change) => change.path)
     .filter(Boolean)
-    .slice(0, 100);
+    .slice(0, MAX_CHANGED_FILES);
 
   const summary =
-    truncateText(activity.progressUpdated?.message, 1000) ??
-    truncateText(activity.agentMessaged?.message, 1000) ??
-    truncateText(activity.messageSent?.prompt, 1000) ??
-    truncateText(activity.sessionCompleted?.message, 1000) ??
-    truncateText(activity.planGenerated?.plan, 1000) ??
+    truncateText(
+      activity.progressUpdated?.message,
+      MAX_ACTIVITY_SUMMARY_LENGTH
+    ) ??
+    truncateText(
+      activity.agentMessaged?.message,
+      MAX_ACTIVITY_SUMMARY_LENGTH
+    ) ??
+    truncateText(activity.messageSent?.prompt, MAX_ACTIVITY_SUMMARY_LENGTH) ??
+    truncateText(
+      activity.sessionCompleted?.message,
+      MAX_ACTIVITY_SUMMARY_LENGTH
+    ) ??
+    truncateText(activity.planGenerated?.plan, MAX_ACTIVITY_SUMMARY_LENGTH) ??
     (activity.planApproved ? 'Plan approved.' : undefined);
 
   return {
@@ -349,14 +409,17 @@ function summarizeActivity(activity: Activity) {
 function activityDetails(activity: Activity) {
   return {
     ...summarizeActivity(activity),
-    plan: truncateText(activity.planGenerated?.plan, 5000),
+    plan: truncateText(activity.planGenerated?.plan, MAX_ACTIVITY_PLAN_LENGTH),
     progressPercentage: activity.progressUpdated?.percentage,
     messageSender: activity.messageSent?.sender,
     media: activity.media
       ? {
           url: activity.media.url,
           mimeType: activity.media.mimeType,
-          description: truncateText(activity.media.description, 1000),
+          description: truncateText(
+            activity.media.description,
+            MAX_MEDIA_DESCRIPTION_LENGTH
+          ),
         }
       : undefined,
   };
@@ -525,8 +588,7 @@ export function createJulesMcpServer(env: Env): McpServer {
           success: true,
           sessionId: session.id,
           state: session.state,
-          monitorUrl:
-            session.url || `https://jules.google.com/sessions/${session.id}`,
+          monitorUrl: sessionMonitorUrl(session),
         });
       } catch (error) {
         return errorResult(error, 'Failed to create Jules coding session.');
@@ -552,8 +614,7 @@ export function createJulesMcpServer(env: Env): McpServer {
           success: true,
           sessionId: session.id,
           state: session.state,
-          monitorUrl:
-            session.url || `https://jules.google.com/sessions/${session.id}`,
+          monitorUrl: sessionMonitorUrl(session),
         });
       } catch (error) {
         return errorResult(error, 'Failed to create Jules session.');
@@ -565,7 +626,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'list_sessions',
     {
       description:
-        'List compact Jules session summaries. Use get_session_status for one session.',
+        'List bounded Jules session summaries without prompts. Use get_session_status for polling and get_session_details only when task context is needed.',
       inputSchema: paginationSchema,
       outputSchema: listSessionsOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -578,7 +639,7 @@ export function createJulesMcpServer(env: Env): McpServer {
         );
         return jsonResult({
           success: true,
-          sessions: result.sessions.map(summarizeSession),
+          sessions: result.sessions.map(sessionListItem),
           nextPageToken: result.nextPageToken,
         });
       } catch (error) {
@@ -591,7 +652,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_session_status',
     {
       description:
-        'Get the current state and compact details of one Jules session.',
+        'Get polling-safe Jules session status only. This tool does not return the prompt or large session metadata.',
       inputSchema: { session_id: sessionIdSchema },
       outputSchema: sessionStatusOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -599,9 +660,28 @@ export function createJulesMcpServer(env: Env): McpServer {
     async ({ session_id }) => {
       try {
         const session = await createJulesClient(env).getSession(session_id);
-        return jsonResult({ success: true, session: sessionDetails(session) });
+        return jsonResult({ success: true, session: sessionStatus(session) });
       } catch (error) {
         return errorResult(error, 'Failed to get Jules session.');
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_session_details',
+    {
+      description:
+        'Get bounded Jules session details including prompt, configuration, and pull request metadata. Use only when those details are needed.',
+      inputSchema: { session_id: sessionIdSchema },
+      outputSchema: sessionDetailsToolOutputSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async ({ session_id }) => {
+      try {
+        const session = await createJulesClient(env).getSession(session_id);
+        return jsonResult({ success: true, session: sessionDetails(session) });
+      } catch (error) {
+        return errorResult(error, 'Failed to get Jules session details.');
       }
     }
   );
@@ -623,7 +703,7 @@ export function createJulesMcpServer(env: Env): McpServer {
           return jsonResult({
             success: true,
             action,
-            session: sessionDetails(session),
+            session: sessionStatus(session),
           });
         }
         if (action === 'send_message') {
@@ -637,7 +717,7 @@ export function createJulesMcpServer(env: Env): McpServer {
           return jsonResult({
             success: true,
             action,
-            session: sessionDetails(session),
+            session: sessionStatus(session),
           });
         }
 
@@ -707,7 +787,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_activity',
     {
       description:
-        'Get one Jules activity with compact details and changed file names, not raw patches.',
+        'Get one Jules activity with bounded details and changed file names, not raw patches.',
       inputSchema: {
         session_id: sessionIdSchema,
         activity_id: activityIdSchema,
