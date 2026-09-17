@@ -4,7 +4,8 @@
  */
 
 /**
- * Represents a source repository for Jules.
+ * Represents a normalized source repository consumed by the MCP layer.
+ * Raw Jules source DTOs are normalized by JulesClient before they reach callers.
  */
 export interface Source {
   /** Resource name format: sources/github/{owner}/{repo} */
@@ -17,8 +18,8 @@ export interface Source {
     repo: string;
     /** The HTML URL of the GitHub repository. */
     htmlUrl: string;
-    /** The default branch of the GitHub repository. */
-    defaultBranch: string;
+    /** Normalized default branch name when Jules provides one. */
+    defaultBranch?: string;
   };
 }
 
