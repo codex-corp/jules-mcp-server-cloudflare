@@ -46,12 +46,24 @@ The remote Worker does not expose `wait_for_session`, schedules, or schedule sto
 
 ## Install and validate
 
+The repository tracks `package-lock.json`. Use the locked dependency graph:
+
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm run worker:typecheck
 npm test
+npx wrangler deploy --dry-run
 ```
+
+The initial lockfile regeneration hit an npm 10.9.8 Arborist `edgesOut` crash. The validated CI path uses npm 11.19.1 before `npm ci`:
+
+```bash
+npm install --global npm@11.19.1
+npm ci
+```
+
+No MCP, Cloudflare, or Jules dependency was downgraded to work around that npm failure.
 
 The existing local/stdio mode remains:
 
