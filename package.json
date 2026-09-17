@@ -44,6 +44,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^22.19.17",
     "@types/node-schedule": "^2.1.7",
     "@vitest/coverage-v8": "^4.1.4",
