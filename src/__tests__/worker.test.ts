@@ -286,7 +286,24 @@ describe('Cloudflare Worker MCP tools', () => {
     );
   });
 
-  it('enforces repository allowlist before Jules is called', async () => {
+  it('enforces repository allowlist against the Jules-resolved source identity', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          name: 'sources/github/other-org/other-repo',
+          githubRepo: {
+            owner: 'other-org',
+            repo: 'other-repo',
+          },
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
     const client = await harness(
       env({ JULES_ALLOWED_REPOS: 'allowed-org/allowed-repo' })
     );
@@ -308,6 +325,7 @@ describe('Cloudflare Worker MCP tools', () => {
         retryable: false,
       },
     });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.content).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
