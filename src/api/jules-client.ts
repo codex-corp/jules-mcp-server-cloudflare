@@ -14,6 +14,11 @@ import type {
   SendMessageRequest,
 } from '../types/jules-api.js';
 import { containsSecret } from '../utils/secret-detection.js';
+import {
+  normalizeJulesActivity,
+  type JulesActivityDto,
+  type ListActivitiesDto,
+} from './jules-activity-normalizer.js';
 
 /**
  * Runtime configuration for the Jules API client.
@@ -125,12 +130,6 @@ function safeDiagnosticText(value: unknown): string | undefined {
  * Custom error class for Jules API interactions.
  */
 export class JulesAPIError extends Error {
-  /**
-   * Creates an instance of JulesAPIError.
-   * @param message - The error message.
-   * @param statusCode - The HTTP status code returned by the API (optional).
-   * @param response - The response body returned by the API (optional).
-   */
   constructor(
     message: string,
     public statusCode?: number,
@@ -150,13 +149,6 @@ export class JulesClient {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
 
-  /**
-   * Creates an instance of JulesClient.
-   * Node/local callers retain environment-variable fallback behavior. Worker callers
-   * should pass an options object so credentials come from request-scoped bindings.
-   * @param apiKeyOrOptions - API key string or explicit runtime configuration.
-   * @throws Error if no API key is provided or found in the Node environment.
-   */
   constructor(apiKeyOrOptions?: string | JulesClientOptions) {
     const nodeEnv =
       typeof process !== 'undefined' ? process.env : undefined;
@@ -178,11 +170,6 @@ export class JulesClient {
       options.maxRetries ?? Number(nodeEnv?.JULES_API_MAX_RETRIES || 2);
   }
 
-  /**
-   * Builds a URL query string while omitting undefined values.
-   * @param params - Query parameters to encode.
-   * @returns Encoded query string, including the leading `?` when needed.
-   */
   private buildQuery(params: Record<string, string | number | undefined>): string {
     const searchParams = new URLSearchParams();
 
@@ -220,13 +207,6 @@ export class JulesClient {
     });
   }
 
-  /**
-   * Generic HTTP request handler with authentication and error handling.
-   * @param endpoint - The API endpoint to call (relative to the base URL).
-   * @param options - The fetch options (method, headers, body, etc.).
-   * @returns A promise that resolves with the parsed JSON response.
-   * @throws JulesAPIError if the API returns an error or a network error occurs.
-   */
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -260,13 +240,11 @@ export class JulesClient {
 
         if (!response.ok) {
           const rawErrorBody = await response.text();
-          // SECURE: Truncate error body to prevent log flooding or PII leakage
           const errorBody =
             rawErrorBody.length > 500
               ? rawErrorBody.substring(0, 500) + '... [truncated]'
               : rawErrorBody;
 
-          // Retry on transient 5xx
           if (response.status >= 500 && attempt < this.maxRetries) {
             attempt++;
             lastError = new JulesAPIError(
@@ -287,7 +265,6 @@ export class JulesClient {
       } catch (error) {
         clearTimeout(timeoutId);
 
-        // Rethrow 4xx JulesAPIErrors immediately — do not retry client errors
         if (error instanceof JulesAPIError) {
           throw error;
         }
@@ -305,7 +282,6 @@ export class JulesClient {
       }
     }
 
-    // Exhausted retries
     throw new JulesAPIError(
       `Network error after ${this.maxRetries + 1} attempts: ${
         lastError instanceof Error ? lastError.message : 'Unknown error'
@@ -313,12 +289,6 @@ export class JulesClient {
     );
   }
 
-  /**
-   * Generic HTTP request handler for endpoints that return an empty body (e.g. 204 No Content).
-   * @param endpoint - The API endpoint.
-   * @param options - Fetch options (method, headers, body, etc.).
-   * @returns A promise resolving to an empty object or parsed JSON when present.
-   */
   private async requestEmpty(
     endpoint: string,
     options: RequestInit = {}
@@ -342,17 +312,19 @@ export class JulesClient {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
       try {
-        const response = await fetch(url, { ...options, headers, signal: controller.signal });
+        const response = await fetch(url, {
+          ...options,
+          headers,
+          signal: controller.signal,
+        });
         clearTimeout(timeoutId);
         if (!response.ok) {
           const rawErrorBody = await response.text();
-          // SECURE: Truncate error body to prevent log flooding or PII leakage
           const errorBody =
             rawErrorBody.length > 500
               ? rawErrorBody.substring(0, 500) + '... [truncated]'
               : rawErrorBody;
 
-          // Retry on transient 5xx
           if (response.status >= 500 && attempt < this.maxRetries) {
             attempt++;
             lastError = new JulesAPIError(
@@ -368,13 +340,11 @@ export class JulesClient {
             errorBody
           );
         }
-        // Body may be empty (204 No Content) — return {} rather than trying to parse JSON
         const text = await response.text();
         return text ? (JSON.parse(text) as Record<string, unknown>) : {};
       } catch (error) {
         clearTimeout(timeoutId);
 
-        // Rethrow 4xx JulesAPIErrors immediately — do not retry client errors
         if (error instanceof JulesAPIError) {
           throw error;
         }
@@ -391,7 +361,6 @@ export class JulesClient {
       }
     }
 
-    // Exhausted retries
     throw new JulesAPIError(
       `Network error after ${this.maxRetries + 1} attempts: ${
         lastError instanceof Error ? lastError.message : 'Unknown error'
@@ -399,13 +368,6 @@ export class JulesClient {
     );
   }
 
-  /**
-   * List all connected GitHub repositories.
-   * GET /v1alpha/sources
-   * @param pageSize - The maximum number of sources to return (default: 100).
-   * @param pageToken - Optional pagination token.
-   * @returns A promise that resolves with the normalized list of sources.
-   */
   async listSources(
     pageSize = 100,
     pageToken?: string
@@ -419,23 +381,11 @@ export class JulesClient {
     };
   }
 
-  /**
-   * Get details for a specific source.
-   * GET /v1alpha/sources/{name}
-   * @param sourceName - The resource name of the source to retrieve.
-   * @returns A promise that resolves with normalized source details.
-   */
   async getSource(sourceName: string): Promise<Source> {
     const response = await this.request<JulesSourceDto>(`/${sourceName}`);
     return normalizeSourceDto(response);
   }
 
-  /**
-   * Create a new coding session.
-   * POST /v1alpha/sessions
-   * @param request - The request body for creating a session.
-   * @returns A promise that resolves with the created session.
-   */
   async createSession(request: CreateSessionRequest): Promise<Session> {
     return this.request<Session>('/sessions', {
       method: 'POST',
@@ -443,13 +393,6 @@ export class JulesClient {
     });
   }
 
-  /**
-   * List all sessions with pagination.
-   * GET /v1alpha/sessions
-   * @param pageSize - The maximum number of sessions to return (default: 20).
-   * @param pageToken - Optional pagination token.
-   * @returns A promise that resolves with the list of sessions.
-   */
   async listSessions(
     pageSize = 20,
     pageToken?: string
@@ -459,23 +402,10 @@ export class JulesClient {
     );
   }
 
-  /**
-   * Get details for a specific session.
-   * GET /v1alpha/sessions/{id}
-   * @param sessionId - The ID of the session to retrieve.
-   * @returns A promise that resolves with the session details.
-   */
   async getSession(sessionId: string): Promise<Session> {
     return this.request<Session>(`/sessions/${sessionId}`);
   }
 
-  /**
-   * Approve the plan for a session in AWAITING_PLAN_APPROVAL state.
-   * Jules returns an empty response for approvePlan, so fetch the session afterward
-   * to preserve the existing Session-returning client contract.
-   * @param sessionId - The ID of the session to approve the plan for.
-   * @returns A promise that resolves with the refreshed session.
-   */
   async approvePlan(sessionId: string): Promise<Session> {
     await this.requestEmpty(`/sessions/${sessionId}:approvePlan`, {
       method: 'POST',
@@ -484,14 +414,6 @@ export class JulesClient {
     return this.getSession(sessionId);
   }
 
-  /**
-   * Send feedback message to an active session.
-   * Jules returns an empty response for sendMessage, so fetch the session afterward
-   * to preserve the existing Session-returning client contract.
-   * @param sessionId - The ID of the session to send the message to.
-   * @param request - The request body containing the message prompt.
-   * @returns A promise that resolves with the refreshed session.
-   */
   async sendMessage(
     sessionId: string,
     request: SendMessageRequest
@@ -504,12 +426,9 @@ export class JulesClient {
   }
 
   /**
-   * List activities for a session (the event stream/log).
-   * GET /v1alpha/sessions/{id}/activities
-   * @param sessionId - The ID of the session to list activities for.
-   * @param pageSize - The maximum number of activities to return (default: 50).
-   * @param pageToken - Optional pagination token.
-   * @returns A promise that resolves with the list of activities.
+   * List activities and normalize the current Jules Activity DTO before callers
+   * consume it. Current upstream activities use createTime and event-specific
+   * objects rather than the older type/timestamp shape.
    */
   async listActivities(
     sessionId: string,
@@ -518,9 +437,13 @@ export class JulesClient {
   ): Promise<ListActivitiesResponse> {
     const endpoint = `/sessions/${sessionId}/activities`;
     try {
-      return await this.request<ListActivitiesResponse>(
+      const response = await this.request<ListActivitiesDto>(
         `${endpoint}${this.buildQuery({ pageSize, pageToken })}`
       );
+      return {
+        activities: (response.activities ?? []).map(normalizeJulesActivity),
+        nextPageToken: response.nextPageToken,
+      };
     } catch (error) {
       this.logActivityFailure(
         'listActivities',
@@ -536,17 +459,11 @@ export class JulesClient {
     }
   }
 
-  /**
-   * Get one activity from a Jules session.
-   * GET /v1alpha/sessions/{session}/activities/{activity}
-   * @param sessionId - The owning session ID.
-   * @param activityId - The activity ID.
-   * @returns A promise that resolves with the activity.
-   */
   async getActivity(sessionId: string, activityId: string): Promise<Activity> {
     const endpoint = `/sessions/${sessionId}/activities/${activityId}`;
     try {
-      return await this.request<Activity>(endpoint);
+      const response = await this.request<JulesActivityDto>(endpoint);
+      return normalizeJulesActivity(response);
     } catch (error) {
       this.logActivityFailure(
         'getActivity',
@@ -559,12 +476,8 @@ export class JulesClient {
   }
 
   /**
-   * List activities for a session created after a given timestamp.
-   * GET /v1alpha/sessions/{id}/activities?filter=createTime>"{since}"
-   * @param sessionId - The ID of the session to list activities for.
-   * @param since - ISO timestamp boundary.
-   * @param pageSize - The maximum number of activities to return.
-   * @returns A promise that resolves with the filtered activities.
+   * Fetch activities at or after a Jules createTime range cursor. Jules' current
+   * API accepts the timestamp directly as the createTime query parameter.
    */
   async listActivitiesSince(
     sessionId: string,
@@ -573,12 +486,16 @@ export class JulesClient {
   ): Promise<ListActivitiesResponse> {
     const endpoint = `/sessions/${sessionId}/activities`;
     try {
-      return await this.request<ListActivitiesResponse>(
+      const response = await this.request<ListActivitiesDto>(
         `${endpoint}${this.buildQuery({
           pageSize,
-          filter: `createTime>"${since.replace(/"/g, '')}"`,
+          createTime: since,
         })}`
       );
+      return {
+        activities: (response.activities ?? []).map(normalizeJulesActivity),
+        nextPageToken: response.nextPageToken,
+      };
     } catch (error) {
       this.logActivityFailure(
         'listActivitiesSince',
@@ -590,22 +507,12 @@ export class JulesClient {
     }
   }
 
-  /**
-   * Delete or cancel a session using the legacy endpoint expected by this project.
-   * @param sessionId - The ID of the session to delete.
-   * @returns A promise that resolves with the empty response.
-   */
   async deleteSession(sessionId: string): Promise<Record<string, unknown>> {
     return this.requestEmpty(`/sessions/${sessionId}`, {
       method: 'DELETE',
     });
   }
 
-  /**
-   * Reject the currently proposed plan using the legacy cancellation behavior.
-   * @param sessionId - The ID of the session whose plan should be rejected.
-   * @returns A promise that resolves with the empty response.
-   */
   async rejectPlan(sessionId: string): Promise<Record<string, unknown>> {
     return this.requestEmpty(`/sessions/${sessionId}`, {
       method: 'DELETE',
