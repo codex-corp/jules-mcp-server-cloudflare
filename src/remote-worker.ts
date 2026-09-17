@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/server';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 
@@ -131,6 +131,10 @@ export function selectActivityContent(
     };
   }
 
+  if (activity.failureReason) {
+    return { type: 'failure_reason', text: activity.failureReason };
+  }
+
   if (activity.progressUpdated?.message) {
     return { type: 'progress_message', text: activity.progressUpdated.message };
   }
@@ -140,10 +144,6 @@ export function selectActivityContent(
       type: 'completion_message',
       text: activity.sessionCompleted.message,
     };
-  }
-
-  if (activity.failureReason) {
-    return { type: 'failure_reason', text: activity.failureReason };
   }
 
   if (activity.description) {
