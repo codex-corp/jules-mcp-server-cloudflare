@@ -23,11 +23,15 @@ Remote Worker tools:
 | Area | Tools |
 | --- | --- |
 | Create | `create_coding_task`, `create_repoless_task` |
-| Sessions | `list_sessions`, `get_session_status`, `manage_session`, `delete_session` |
+| Sessions | `list_sessions`, `get_session_status`, `get_session_details`, `manage_session`, `delete_session` |
 | Activities | `list_activities`, `get_activity`, `get_activities_since` |
 | Sources | `list_sources`, `get_source_details` |
 
 All remote tools advertise an MCP `outputSchema` so clients such as ChatGPT can consume structured results. List tools return compact summaries instead of forwarding raw Jules payloads or large code patches; use the focused `get_*` tools when you need details for one item.
+
+`manage_session` supports plan approval and session messaging. Session deletion is exposed separately through the explicitly destructive `delete_session` tool.
+
+All remote list-style inputs follow the Jules API maximum page size of 100. `get_activities_since` returns `hasMore` and an opaque `nextCursor` when more matching activities remain, so bounded polling does not silently discard later matches.
 
 The remote Worker intentionally does not expose the local scheduler or polling/wait tools.
 

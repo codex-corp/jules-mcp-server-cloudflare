@@ -81,7 +81,7 @@ const createRepolessTaskSchema = {
 
 const manageSessionSchema = {
   session_id: sessionIdSchema,
-  action: z.enum(['approve_plan', 'send_message', 'reject_plan']),
+  action: z.enum(['approve_plan', 'send_message']),
   message: z
     .string()
     .min(1)
@@ -94,14 +94,15 @@ const manageSessionSchema = {
 };
 
 const paginationSchema = {
-  page_size: z.number().int().min(1).max(200).default(DEFAULT_PAGE_SIZE),
+  page_size: z.number().int().min(1).max(100).default(DEFAULT_PAGE_SIZE),
   page_token: z.string().optional(),
 };
 
 const getActivitiesSinceSchema = {
   session_id: sessionIdSchema,
   since: z.string().datetime({ offset: true }),
-  page_size: z.number().int().min(1).max(200).default(DEFAULT_PAGE_SIZE),
+  page_size: z.number().int().min(1).max(100).default(DEFAULT_PAGE_SIZE),
+  cursor: z.string().min(1).max(1000).optional(),
 };
 
 const sessionListItemOutputSchema = z.object({
@@ -219,7 +220,7 @@ const sessionDetailsToolOutputSchema = z.object({
 
 const manageSessionOutputSchema = z.object({
   success: z.boolean(),
-  action: z.enum(['approve_plan', 'send_message', 'reject_plan']).optional(),
+  action: z.enum(['approve_plan', 'send_message']).optional(),
   session: sessionStatusValueOutputSchema.optional(),
   sessionId: z.string().optional(),
   state: z.string().optional(),
@@ -250,6 +251,8 @@ const activitiesSinceOutputSchema = z.object({
   sessionId: z.string().optional(),
   since: z.string().optional(),
   activities: z.array(activitySummaryOutputSchema).optional(),
+  hasMore: z.boolean().optional(),
+  nextCursor: z.string().optional(),
   error: toolErrorSchema.optional(),
 });
 
@@ -689,11 +692,10 @@ export function createJulesMcpServer(env: Env): McpServer {
   server.registerTool(
     'manage_session',
     {
-      description:
-        'Approve a Jules plan, send a message to a session, or reject a plan.',
+      description: 'Approve a Jules plan or send a message to a session.',
       inputSchema: manageSessionSchema,
       outputSchema: manageSessionOutputSchema,
-      annotations: DESTRUCTIVE_WRITE_ANNOTATIONS,
+      annotations: ADDITIVE_WRITE_ANNOTATIONS,
     },
     async ({ session_id, action, message }) => {
       try {
@@ -706,27 +708,19 @@ export function createJulesMcpServer(env: Env): McpServer {
             session: sessionStatus(session),
           });
         }
-        if (action === 'send_message') {
-          if (!message) {
-            return errorResult(
-              new Error('message is required for send_message.'),
-              'message is required for send_message.'
-            );
-          }
-          const session = await client.sendMessage(session_id, { prompt: message });
-          return jsonResult({
-            success: true,
-            action,
-            session: sessionStatus(session),
-          });
+
+        if (!message) {
+          return errorResult(
+            new Error('message is required for send_message.'),
+            'message is required for send_message.'
+          );
         }
 
-        await client.rejectPlan(session_id);
+        const session = await client.sendMessage(session_id, { prompt: message });
         return jsonResult({
           success: true,
           action,
-          sessionId: session_id,
-          state: 'CANCELED',
+          session: sessionStatus(session),
         });
       } catch (error) {
         return errorResult(error, 'Failed to manage Jules session.');
@@ -759,7 +753,7 @@ export function createJulesMcpServer(env: Env): McpServer {
         'List compact activities for a Jules session without returning large code patches.',
       inputSchema: {
         session_id: sessionIdSchema,
-        page_size: z.number().int().min(1).max(200).default(DEFAULT_PAGE_SIZE),
+        page_size: z.number().int().min(1).max(100).default(DEFAULT_PAGE_SIZE),
         page_token: z.string().optional(),
       },
       outputSchema: listActivitiesOutputSchema,
@@ -812,23 +806,26 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_activities_since',
     {
       description:
-        'List compact Jules session activities newer than an ISO timestamp.',
+        'List compact Jules session activities newer than an ISO timestamp, with an opaque cursor when more results remain.',
       inputSchema: getActivitiesSinceSchema,
       outputSchema: activitiesSinceOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ session_id, since, page_size }) => {
+    async ({ session_id, since, page_size, cursor }) => {
       try {
         const result = await createJulesClient(env).listActivitiesSince(
           session_id,
           since,
-          page_size
+          page_size,
+          cursor
         );
         return jsonResult({
           success: true,
           sessionId: session_id,
           since,
           activities: result.activities.map(summarizeActivity),
+          hasMore: result.hasMore,
+          nextCursor: result.nextCursor,
         });
       } catch (error) {
         return errorResult(error, 'Failed to list recent Jules activities.');

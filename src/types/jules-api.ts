@@ -216,7 +216,7 @@ export interface Activity {
     changeSet?: ChangeSet;
   };
   messageSent?: {
-    /** The message content. */
+    /** The message content to send. */
     prompt: string;
     /** The sender of the message. */
     sender: 'USER' | 'AGENT';
@@ -245,8 +245,12 @@ export interface Activity {
 export interface ListActivitiesResponse {
   /** A list of activities. */
   activities: Activity[];
-  /** A token for the next page of results. */
+  /** A token for the next upstream page of results. */
   nextPageToken?: string;
+  /** Whether a bounded incremental activity result has additional items. */
+  hasMore?: boolean;
+  /** Opaque continuation cursor for a bounded incremental activity result. */
+  nextCursor?: string;
 }
 
 /**

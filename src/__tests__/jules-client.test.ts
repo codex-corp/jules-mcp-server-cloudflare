@@ -186,7 +186,11 @@ describe('JulesClient Methods', () => {
 
   it('listActivitiesSince', async () => {
     mockSuccess({ activities: [] });
-    await expect(client.listActivitiesSince('1', '2025-01-01', 10)).resolves.toEqual({ activities: [] });
+    await expect(client.listActivitiesSince('1', '2025-01-01', 10)).resolves.toEqual({
+      activities: [],
+      hasMore: false,
+      nextCursor: undefined,
+    });
   });
 
   it('deleteSession', async () => {
