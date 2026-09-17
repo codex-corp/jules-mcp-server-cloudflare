@@ -150,17 +150,13 @@ export interface ListSessionsResponse {
 }
 
 /**
- * Type of activity in a session.
- * - `PLAN_GENERATED`: A plan was generated.
- * - `PROGRESS_UPDATED`: Progress was updated.
- * - `SESSION_COMPLETED`: Session was completed.
- * - `MESSAGE_SENT`: A message was sent.
- * - `ACTIVITY_TYPE_UNSPECIFIED`: Unspecified activity type.
+ * Normalized activity type used by callers after JulesClient maps the upstream DTO.
  */
 export type ActivityType =
   | 'PLAN_GENERATED'
   | 'PROGRESS_UPDATED'
   | 'SESSION_COMPLETED'
+  | 'SESSION_FAILED'
   | 'MESSAGE_SENT'
   | 'AGENT_MESSAGED'
   | 'PLAN_APPROVED'
@@ -186,7 +182,8 @@ export interface ChangeSet {
 }
 
 /**
- * Represents an activity within a session.
+ * Normalized activity consumed by local tools and the Worker adapter.
+ * JulesClient converts the current upstream Activity DTO into this stable shape.
  */
 export interface Activity {
   /** Resource name format: sessions/{session_id}/activities/{activity_id} */
