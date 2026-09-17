@@ -109,23 +109,67 @@ describe('Phase 1B Jules activity compatibility', () => {
     );
   });
 
-  it('uses Jules createTime as the incremental activity cursor', async () => {
-    mockJson({ activities: [] });
-
-    const since = '2026-09-15T00:00:00Z';
-    await client.listActivitiesSince('60180116143991679', since, 20);
-
+  it('filters incremental activities client-side using supported pagination', async () => {
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const requestedUrl = String(fetchMock.mock.calls[0]?.[0]);
-    const url = new URL(requestedUrl);
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: vi.fn().mockResolvedValue({
+          activities: [
+            {
+              name: 'sessions/123/activities/old',
+              createTime: '2026-09-15T11:59:59Z',
+              progressUpdated: { description: 'Old update' },
+            },
+            {
+              name: 'sessions/123/activities/newer',
+              createTime: '2026-09-15T12:05:00Z',
+              progressUpdated: { description: 'Later update' },
+            },
+          ],
+          nextPageToken: 'next-page',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: vi.fn().mockResolvedValue({
+          activities: [
+            {
+              name: 'sessions/123/activities/new',
+              createTime: '2026-09-15T12:01:00Z',
+              agentMessaged: { agentMessage: 'First new update' },
+            },
+            {
+              name: 'sessions/123/activities/boundary',
+              createTime: '2026-09-15T12:00:00Z',
+              progressUpdated: { description: 'Boundary update' },
+            },
+          ],
+        }),
+      });
 
-    expect(url.pathname).toBe(
-      '/v1alpha/sessions/60180116143991679/activities'
-    );
-    expect(url.searchParams.get('pageSize')).toBe('20');
-    expect(url.searchParams.get('createTime')).toBe(since);
-    expect(url.searchParams.has('filter')).toBe(false);
+    const since = '2026-09-15T12:00:00Z';
+    const result = await client.listActivitiesSince('123', since, 5);
+
+    expect(result.activities.map((activity) => activity.name)).toEqual([
+      'sessions/123/activities/new',
+      'sessions/123/activities/newer',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const firstUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(firstUrl.pathname).toBe('/v1alpha/sessions/123/activities');
+    expect(firstUrl.searchParams.get('pageSize')).toBe('100');
+    expect(firstUrl.searchParams.has('createTime')).toBe(false);
+    expect(firstUrl.searchParams.has('filter')).toBe(false);
+
+    const secondUrl = new URL(String(fetchMock.mock.calls[1]?.[0]));
+    expect(secondUrl.searchParams.get('pageToken')).toBe('next-page');
+    expect(secondUrl.searchParams.has('createTime')).toBe(false);
   });
 
   it('keeps activity pagination tokens on ordinary list requests', async () => {
