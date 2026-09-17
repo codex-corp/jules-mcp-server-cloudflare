@@ -1,4 +1,9 @@
-import type { Activity, ActivityType, ChangeSet } from '../types/jules-api.js';
+import type {
+  Activity,
+  ActivityArtifacts,
+  ActivityType,
+  ChangeSet,
+} from '../types/jules-api.js';
 
 interface JulesPlanStepDto {
   id?: string;
@@ -112,6 +117,10 @@ function formatPlan(plan: string | JulesPlanDto | undefined): string | undefined
   return plan.id ? `Plan ${plan.id}` : undefined;
 }
 
+function planId(plan: string | JulesPlanDto | undefined): string | undefined {
+  return typeof plan === 'object' && plan ? plan.id : undefined;
+}
+
 function inferActivityType(activity: JulesActivityDto): ActivityType {
   if (activity.type) return activity.type;
   if (activity.planGenerated) return 'PLAN_GENERATED';
@@ -142,18 +151,56 @@ function extractChangedFiles(patch: string | undefined): string[] {
   return paths;
 }
 
-function normalizeArtifactChangeSet(activity: JulesActivityDto): ChangeSet | undefined {
-  const raw = activity.artifacts?.find((artifact) => artifact.changeSet)?.changeSet;
-  const patch = raw?.gitPatch?.unidiffPatch;
-  if (!raw && !patch) return undefined;
+function normalizeArtifactChangeSet(
+  raw: JulesArtifactDto['changeSet']
+): ChangeSet | undefined {
+  if (!raw) return undefined;
 
+  const patch = raw.gitPatch?.unidiffPatch;
   const changedFiles = extractChangedFiles(patch);
   return {
+    source: raw.source,
+    baseCommitId: raw.gitPatch?.baseCommitId,
+    suggestedCommitMessage: raw.gitPatch?.suggestedCommitMessage,
     ...(patch ? { patch } : {}),
     ...(changedFiles.length > 0
       ? { changes: changedFiles.map((path) => ({ path })) }
       : {}),
   };
+}
+
+function normalizeArtifacts(activity: JulesActivityDto): ActivityArtifacts | undefined {
+  const changeSets: ChangeSet[] = [];
+  const bashOutputs: ActivityArtifacts['bashOutputs'] = [];
+  const media: ActivityArtifacts['media'] = [];
+
+  for (const artifact of activity.artifacts ?? []) {
+    const changeSet = normalizeArtifactChangeSet(artifact.changeSet);
+    if (changeSet) changeSets.push(changeSet);
+
+    if (artifact.bashOutput) {
+      bashOutputs.push({
+        command: artifact.bashOutput.command,
+        output: artifact.bashOutput.output,
+        exitCode: artifact.bashOutput.exitCode,
+      });
+    }
+
+    if (artifact.media) {
+      media.push({
+        url: artifact.media.url,
+        mimeType: artifact.media.mimeType,
+        description: artifact.media.description,
+        dataAvailable: Boolean(artifact.media.data),
+      });
+    }
+  }
+
+  if (changeSets.length === 0 && bashOutputs.length === 0 && media.length === 0) {
+    return undefined;
+  }
+
+  return { changeSets, bashOutputs, media };
 }
 
 function normalizeProgressMessage(activity: JulesActivityDto): string | undefined {
@@ -191,10 +238,12 @@ function sanitizeAgentMessage(message: string | undefined): string | undefined {
 /**
  * Convert Jules' current Activity DTO to the stable activity shape consumed by
  * MCP tools. This keeps upstream response changes out of the public MCP contract.
+ * Embedded media bytes are deliberately discarded during normalization.
  */
 export function normalizeJulesActivity(activity: JulesActivityDto): Activity {
   const type = inferActivityType(activity);
-  const artifactChangeSet = normalizeArtifactChangeSet(activity);
+  const artifacts = normalizeArtifacts(activity);
+  const artifactChangeSet = artifacts?.changeSets[0];
   const plan = formatPlan(activity.planGenerated?.plan);
   const progressMessage = normalizeProgressMessage(activity);
   const userMessage = activity.userMessaged?.userMessage;
@@ -202,29 +251,33 @@ export function normalizeJulesActivity(activity: JulesActivityDto): Activity {
     activity.agentMessaged?.agentMessage ?? activity.agentMessaged?.message
   );
   const failureReason = activity.sessionFailed?.reason;
-
-  const firstMedia = activity.artifacts?.find((artifact) => artifact.media)?.media;
+  const firstMedia = artifacts?.media[0];
 
   const normalized: Activity = {
     name: activity.name,
     type,
+    originator: activity.originator,
+    description: activity.description,
     timestamp: activity.createTime ?? activity.timestamp,
+    failureReason,
+    artifacts,
   };
 
   if (activity.planGenerated) {
     normalized.planGenerated = {
       plan: plan ?? activity.description ?? 'Plan generated.',
+      planId: planId(activity.planGenerated.plan),
       changeSet: activity.planGenerated.changeSet ?? artifactChangeSet,
     };
   }
 
   if (activity.planApproved) {
     normalized.planApproved = {
+      planId: activity.planApproved.planId,
       approvedAt:
         activity.planApproved.approvedAt ??
         activity.createTime ??
-        activity.timestamp ??
-        '',
+        activity.timestamp,
     };
   }
 
@@ -256,8 +309,6 @@ export function normalizeJulesActivity(activity: JulesActivityDto): Activity {
     !activity.messageSent &&
     !activity.sessionCompleted
   ) {
-    // Preserve useful descriptions for activity kinds that do not have a
-    // dedicated payload in our normalized model.
     normalized.progressUpdated = { message: activity.description };
   }
 
@@ -271,11 +322,11 @@ export function normalizeJulesActivity(activity: JulesActivityDto): Activity {
   }
 
   if (activity.media || firstMedia) {
-    const media = activity.media ?? firstMedia;
+    const selectedMedia = activity.media ?? firstMedia;
     normalized.media = {
-      url: media?.url,
-      mimeType: media?.mimeType,
-      description: media?.description ?? activity.description,
+      url: selectedMedia?.url,
+      mimeType: selectedMedia?.mimeType,
+      description: selectedMedia?.description ?? activity.description,
     };
   }
 
