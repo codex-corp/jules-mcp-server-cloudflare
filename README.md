@@ -27,6 +27,8 @@ Remote Worker tools:
 | Activities | `list_activities`, `get_activity`, `get_activities_since` |
 | Sources | `list_sources`, `get_source_details` |
 
+All remote tools advertise an MCP `outputSchema` so clients such as ChatGPT can consume structured results. List tools return compact summaries instead of forwarding raw Jules payloads or large code patches; use the focused `get_*` tools when you need details for one item.
+
 The remote Worker intentionally does not expose the local scheduler or polling/wait tools.
 
 ## Prerequisites

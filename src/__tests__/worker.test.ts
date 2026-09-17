@@ -1,5 +1,5 @@
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import worker, {
   createJulesMcpServer,
@@ -88,6 +88,7 @@ describe('Cloudflare Worker MCP tools', () => {
   const openClients: Client[] = [];
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     await Promise.all(openClients.splice(0).map((client) => client.close()));
     await Promise.all(openServers.splice(0).map((server) => server.close()));
   });
@@ -99,28 +100,132 @@ describe('Cloudflare Worker MCP tools', () => {
     return connected.client;
   }
 
-  it('discovers the required stateless remote Jules tools', async () => {
+  it('discovers the required stateless remote Jules tools with output schemas', async () => {
     const client = await harness(env());
     const result = await client.listTools();
     const names = result.tools.map((tool) => tool.name);
 
-    expect(names).toEqual(
-      expect.arrayContaining([
-        'create_coding_task',
-        'create_repoless_task',
-        'list_sessions',
-        'get_session_status',
-        'manage_session',
-        'delete_session',
-        'list_activities',
-        'get_activity',
-        'get_activities_since',
-        'list_sources',
-        'get_source_details',
-      ])
-    );
+    const requiredTools = [
+      'create_coding_task',
+      'create_repoless_task',
+      'list_sessions',
+      'get_session_status',
+      'manage_session',
+      'delete_session',
+      'list_activities',
+      'get_activity',
+      'get_activities_since',
+      'list_sources',
+      'get_source_details',
+    ];
+
+    expect(names).toEqual(expect.arrayContaining(requiredTools));
     expect(names).not.toContain('wait_for_session');
     expect(names).not.toContain('schedule_recurring_task');
+
+    for (const name of requiredTools) {
+      const tool = result.tools.find((candidate) => candidate.name === name);
+      expect(tool?.outputSchema).toEqual(
+        expect.objectContaining({ type: 'object' })
+      );
+    }
+
+    const listSessions = result.tools.find(
+      (tool) => tool.name === 'list_sessions'
+    );
+    expect(listSessions?.annotations).toEqual(
+      expect.objectContaining({
+        readOnlyHint: true,
+        destructiveHint: false,
+      })
+    );
+
+    const createTask = result.tools.find(
+      (tool) => tool.name === 'create_coding_task'
+    );
+    expect(createTask?.annotations).toEqual(
+      expect.objectContaining({
+        readOnlyHint: false,
+        destructiveHint: false,
+      })
+    );
+
+    const deleteSession = result.tools.find(
+      (tool) => tool.name === 'delete_session'
+    );
+    expect(deleteSession?.annotations).toEqual(
+      expect.objectContaining({
+        readOnlyHint: false,
+        destructiveHint: true,
+      })
+    );
+  });
+
+  it('keeps list_sessions compact instead of forwarding large Jules payloads', async () => {
+    const hugePatch = 'diff --git a/file.ts b/file.ts\n'.repeat(30000);
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          sessions: [
+            {
+              name: 'sessions/session-1',
+              id: 'session-1',
+              title: 'Large completed session',
+              prompt: 'Refactor the service and keep behavior unchanged.',
+              state: 'COMPLETED',
+              createTime: '2026-09-17T10:00:00Z',
+              updateTime: '2026-09-17T10:30:00Z',
+              sourceContext: {
+                source: 'sources/github/acme/repo',
+                githubRepoContext: { startingBranch: 'main' },
+              },
+              outputs: [
+                {
+                  changeSet: {
+                    gitPatch: hugePatch,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = await harness(env({ JULES_API_MAX_RETRIES: '0' }));
+    const result = await client.callTool({
+      name: 'list_sessions',
+      arguments: {},
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const structured = result.structuredContent as {
+      success: boolean;
+      sessions: Array<Record<string, unknown>>;
+    };
+    expect(structured.success).toBe(true);
+    expect(structured.sessions).toHaveLength(1);
+    expect(structured.sessions[0]).toEqual(
+      expect.objectContaining({
+        id: 'session-1',
+        state: 'COMPLETED',
+        source: 'sources/github/acme/repo',
+        branch: 'main',
+      })
+    );
+    expect(structured.sessions[0]).not.toHaveProperty('outputs');
+    expect(structured.sessions[0]).not.toHaveProperty('prompt');
+
+    const serialized = JSON.stringify(structured);
+    expect(serialized).not.toContain('gitPatch');
+    expect(serialized.length).toBeLessThan(5000);
   });
 
   it('rejects likely secrets in coding and repoless prompts', async () => {
@@ -195,9 +300,14 @@ describe('Cloudflare Worker MCP tools', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({
-      success: false,
-      error: 'Failed to create Jules coding session.',
-    });
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Failed to create Jules coding session.'),
+        }),
+      ])
+    );
   });
 });
