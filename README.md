@@ -1,391 +1,261 @@
-# Jules MCP Server
+# Jules MCP Server for Cloudflare Workers
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org/)
-[![MCP](https://img.shields.io/badge/MCP-1.0.4-purple)](https://modelcontextprotocol.io/)
+A small, stateless remote MCP server for the Google Jules API.
 
-A production-ready **Model Context Protocol (MCP)** server for the Google Jules API, enabling autonomous coding tasks and scheduling directly from AI assistants like Claude.
+It runs on Cloudflare Workers, exposes Streamable HTTP at `/mcp`, and uses Cloudflare Access Managed OAuth for authentication. The Jules API key stays in Cloudflare Secrets and is never sent to the MCP client.
 
-> **⚠️ DISCLAIMER**: This is an **independent, open-source project** and is **NOT officially created, maintained, or endorsed by Google**. This server is a community-driven integration with the public Jules API. Use at your own risk. For official Jules documentation, visit [jules.google](https://jules.google).
+![Jules MCP connected in MCP Inspector](docs/assets/mcp-inspector.jpg)
 
-## 🌟 Star This Repository
+> This is an independent open-source project. It is not created, maintained, or endorsed by Google.
 
-If you find this useful, please star ⭐ the repository to help others discover it!
+## What it provides
 
-## Overview
+- Remote MCP over Streamable HTTP
+- Cloudflare Workers deployment
+- Cloudflare Access Managed OAuth
+- Stateless request handling; no database or Durable Objects
+- Jules sessions, activities, sources, plan approval, and messaging
+- Optional repository allowlist
+- Local stdio server remains available for existing workflows
 
-This MCP server bridges the Google Jules coding agent with AI assistants, allowing you to:
+Remote Worker tools:
 
-- **Create coding tasks** - Delegate bug fixes, refactoring, tests, and features to Jules
-- **Schedule recurring tasks** - Set up automated weekly/daily maintenance (dependency updates, security audits, etc.)
-- **Monitor progress** - Track session states and review generated plans
-- **Approve plans** - Human-in-the-loop control before code changes
-- **Manage workflows** - Send feedback and iterate on Jules's work
-- **Activepieces Integration** - Use the included Jules piece (`pieces/jules`) to automate coding tasks in your Activepieces workflows
+| Area | Tools |
+| --- | --- |
+| Create | `create_coding_task`, `create_repoless_task` |
+| Sessions | `list_sessions`, `get_session_status`, `manage_session`, `delete_session` |
+| Activities | `list_activities`, `get_activity`, `get_activities_since` |
+| Sources | `list_sources`, `get_source_details` |
 
-### Architecture: The "Thick Server" Pattern
+The remote Worker intentionally does not expose the local scheduler or polling/wait tools.
 
-Since the Jules API v1alpha is **stateless** (no native scheduling endpoints), this server implements a **local scheduling engine**:
+## Prerequisites
 
-- **Persistent Storage**: Schedules stored in `~/.jules-mcp/schedules.enc`
-- **Cron Engine**: Uses `node-schedule` for reliable task execution
-- **Survives Restarts**: Schedules are rehydrated on server startup
-- **Autonomous Execution**: Scheduled tasks run even without active IDE sessions
+You need:
 
-## Installation
+- A Cloudflare account with Workers and Zero Trust Access
+- Node.js 22+ recommended
+- npm 11.19.1 recommended
+- A Jules API key from <https://jules.google.com/settings>
+- Git
+- GitHub repositories connected to Jules if you want to create repository-backed tasks
 
-### Prerequisites
+The project is tested in CI with Node 22. npm 10.9.8 hit an Arborist dependency-resolution bug while regenerating this project's lockfile, so npm 11.19.1 is the validated version.
 
-- **Node.js** 18.0.0 or higher
-- **npm** 9.0.0 or higher
-- **Jules API Key** - Generate at [jules.google/settings](https://jules.google/settings)
-- **GitHub Repositories** - Ensure your repositories are connected to Jules and the GitHub app is installed.
-
-### Developer Setup
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/savethepolarbears/jules-mcp-server.git
-cd jules-mcp-server
-
-# 2. Install dependencies
-npm install
-
-# 3. Configure environment
-# Copy example env and fill in your JULES_API_KEY
-cp .env.example .env
-
-# 4. Verify the setup
-npm run lint
-npm run typecheck
-npm run test
-
-# 5. Build the project and run a smoke test to verify connectivity
-npm run mcp:smoke
-```
-
-### Quick smoke test (MCP stdio)
-
-After building and setting `JULES_API_KEY`, you can validate the server end-to-end:
+## Install
 
 ```bash
-npm run mcp:smoke
-```
+git clone https://github.com/codex-corp/jules-mcp-server-cloudflare.git
+cd jules-mcp-server-cloudflare
 
-Expected output (with a valid key):
+npm install --global npm@11.19.1
+npm ci
 
-- Lists 11 tools, 5 prompts, and the 4 core resources
-- Attempts to read a fake session ID and reports a Jules 404 (proves real API calls work)
-- Attempts a tool call with dummy data and reports the API error without crashing
-
-### Global Installation (Recommended)
-
-```bash
-# Install globally
-npm install -g
-
-# Now available as: jules-mcp
-jules-mcp
-```
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file or set these in your shell:
-
-```bash
-# Required - Your Jules API Key
-JULES_API_KEY=your_jules_api_key_here
-
-# Strongly Recommended - Encryption key for local schedules
-# Using JULES_API_KEY as fallback means rotating your API key will make all scheduled tasks unreadable.
-# Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-JULES_ENCRYPTION_KEY=your_strong_random_key_here
-
-# Required for create_coding_task. Comma-separated list of authorized repositories.
-JULES_ALLOWED_REPOS=owner/repo1,owner/repo2
-
-# Optional - Default branch for coding tasks
-JULES_DEFAULT_BRANCH=main
-```
-
-## Security & Privacy
-
-This server is designed with a "security-first" approach to protect your repositories and data:
-
-- **Restrictive File Permissions**: Local schedule storage (`~/.jules-mcp`) uses `0o700` directory permissions and `0o600` file permissions, ensuring only the owner can read or write task data.
-- **Encrypted Local State**: All scheduled tasks are stored using **AES-256-GCM** encryption. A unique, random 16-byte salt is generated for every write operation to prevent offline attacks and ensure data integrity.
-- **PII Leak Prevention**: Raw Jules API responses are sanitized and truncated (max 500 characters) before being included in logs or exceptions, preventing accidental disclosure of proprietary code or personal information in system logs.
-- **Generic Validation Errors**: The server returns generic error messages when repository validation fails, preventing the enumeration of your private repository allowlist.
-- **Human-in-the-Loop**: Use the `require_plan_approval: true` flag to ensure Jules never modifies code without your explicit review and approval of the generated plan.
-
-### Claude Desktop Configuration
-
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "jules": {
-      "command": "node",
-      "args": ["/path/to/jules-mcp/dist/index.js"],
-      "env": {
-        "JULES_API_KEY": "your-key-here"
-      }
-    }
-  }
-}
-```
-
-**On macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**On Windows**: `%APPDATA%/Claude/claude_desktop_config.json`
-
-### VS Code / Cursor Configuration
-
-For Cursor or VS Code with MCP support:
-
-```json
-{
-  "mcp.servers": {
-    "jules": {
-      "command": "jules-mcp",
-      "env": {
-        "JULES_API_KEY": "your-key-here"
-      }
-    }
-  }
-}
-```
-
-## Usage
-
-Once configured, your AI assistant can use Jules through natural language:
-
-### Creating Immediate Tasks
-
-```text
-"Use Jules to add unit tests for the authentication module in my-app-backend repository"
-```
-
-The assistant will:
-
-1. Check `jules://sources` to find the repository
-2. Call `create_coding_task` tool with appropriate prompt
-3. Return the session ID for monitoring
-
-### Scheduling Recurring Tasks
-
-```text
-"Schedule Jules to update dependencies every Monday at 9 AM in my-app-backend"
-```
-
-The assistant will:
-
-1. Call `schedule_recurring_task` with cron `"0 9 * * 1"`
-2. Save the schedule to `~/.jules-mcp/schedules.enc`
-3. Confirm the next execution time
-
-### Monitoring Progress
-
-```text
-"Check the status of Jules session abc123"
-```
-
-The assistant will:
-
-1. Call `get_session_status` or read `jules://sessions/abc123/full`
-2. Show current state (PLANNING, IN_PROGRESS, COMPLETED, etc.)
-3. Provide next steps based on state
-
-### Reviewing and Approving Plans
-
-```text
-"Show me Jules's plan for session abc123 and approve it"
-```
-
-The assistant will:
-
-1. Read `jules://sessions/abc123/full` to get the plan
-2. Display the plan steps to you
-3. Call `manage_session` with `action=approve_plan` after your confirmation
-
-## Migration Guide
-
-The server has migrated from plain JSON storage (`schedules.json`) to encrypted storage (`schedules.enc`).
-
-- **Auto-Migration**: Upon startup, if `schedules.json` is detected, the server automatically encrypts its contents and saves them to `schedules.enc`, then deletes the unencrypted file.
-- **Backwards Compatibility**: No manual action is required if you are upgrading from a version that used `schedules.json`.
-
-## Documentation
-
-Detailed documentation has been moved to the `docs/` folder:
-
-- [API Reference](docs/API_REFERENCE.md) - Complete details on available MCP Tools, Resources, and Prompts.
-- [Architecture](docs/ARCHITECTURE.md) - System design and the "Thick Server" pattern.
-- [Configuration](docs/CONFIGURATION.md) - Environment variables and setup instructions.
-- [Examples](docs/EXAMPLES.md) - Example workflows and usage patterns.
-- [Quickstart](docs/QUICKSTART.md) - A fast guide to getting up and running.
-- [Activepieces Integration](pieces/jules/README.md) - Documentation for the custom Google Jules Activepieces integration.
-
-## Security Considerations
-
-### API Key Security
-
-- **Never commit** your `JULES_API_KEY` to version control
-- Store in environment variables or secure secrets manager
-- The API key grants **write access** to connected repositories
-
-### Repository Allowlist
-
-Use `JULES_ALLOWED_REPOS` to restrict which repositories can be modified:
-
-```bash
-export JULES_ALLOWED_REPOS="myorg/safe-repo,myorg/test-repo"
-```
-
-This prevents accidental modifications to production or sensitive repos.
-
-### Plan Approval Workflow
-
-For critical repositories, **always** set `require_plan_approval: true`:
-
-```text
-"Create a task but require plan approval before any code changes"
-```
-
-This ensures human review before Jules modifies code.
-
-### Safe OpenClaw/Codex Integration
-
-When integrating with autonomous AI agents like OpenClaw or Codex, additional safety measures are enforced:
-
-1. **Auto-PR Defaults**: Prompt templates now encourage setting `auto_create_pr: true` to ensure all AI-driven changes are reviewed as Pull Requests before merging.
-2. **Mandatory Review**: It is strongly recommended to set `require_plan_approval: true` for tasks generated by other AI systems to establish trust before allowing direct changes.
-3. **Quota-Aware Scheduling**: To respect API limits and prevent unintended runaway tasks, the cron engine validates all schedules. **Schedules must not run more frequently than once per hour**. Daily or weekly intervals are highly recommended for automated maintenance.
-4. **Resilient Storage**: Local schedules are saved using atomic file writes with corrupted-state backups to prevent the server from crashing during unexpected failures.
-
-### Audit Logging
-
-All scheduled task executions are logged to `jules://schedules/history`. Review this regularly to audit autonomous activities.
-
-## Troubleshooting
-
-### "JULES_API_KEY environment variable is required"
-
-Set your API key:
-
-```bash
-export JULES_API_KEY="your-key-here"
-```
-
-### "Repository not found" error
-
-1. Check `jules://sources` resource to see connected repos
-2. Ensure the GitHub app is installed on the repository
-3. Use the exact resource name format: `sources/github/owner/repo`
-
-### Schedules not persisting
-
-Check that `~/.jules-mcp/schedules.enc` exists and is writable.
-
-### TypeScript compilation errors
-
-```bash
-npm run typecheck
-```
-
-## Development
-
-### Documentation
-
-This project uses **JSDoc** for comprehensive code documentation. Every public function, method, and class is documented with clear descriptions of purpose, parameters, and return values.
-
-To explore the architecture and API details, check the [docs/](docs/) directory.
-
-### Testing
-
-We use **Vitest** for unit and integration testing.
-
-```bash
-# Run all tests
+npm run worker:typecheck
 npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Generate coverage report
-npm run test:coverage
 ```
 
-### Project Structure
+## Login / Auth
 
-```text
-src/
-  types/          # TypeScript type definitions (Jules API & local state)
-  api/            # Jules API client layer with retry logic
-  storage/        # Secure persistence layer (encrypted JSON)
-  scheduler/      # Cron engine for recurring task management
-  mcp/            # MCP protocol layer (tools, resources, prompts)
-  utils/          # Security, rate limiting, and string utilities
-  index.ts        # Server entry point and MCP handler setup
-pieces/           # Activepieces integration (Google Jules piece)
-```
-
-### Build Commands
+Login to Cloudflare with Wrangler:
 
 ```bash
-npm run build      # Compile TypeScript
-npm run dev        # Development mode with tsx
-npm run typecheck  # Type checking only
+npm run worker:login
 ```
 
-## API Endpoints Covered
+Verify which Cloudflare account Wrangler is using:
 
-This server provides complete coverage of the Jules v1alpha API:
+```bash
+npm run worker:auth
+```
 
-| Endpoint | Method | MCP Mapping |
-| ---------- | -------- | ------------- |
-| `/sources` | GET | Resource: `jules://sources` |
-| `/sources/{name}` | GET | Included in full session resource |
-| `/sessions` | POST | Tool: `create_coding_task` |
-| `/sessions` | GET | Resource: `jules://sessions/list` |
-| `/sessions/{id}` | GET | Tool: `get_session_status` |
-| `/sessions/{id}:approvePlan` | POST | Tool: `manage_session` (approve_plan) |
-| `/sessions/{id}:sendMessage` | POST | Tool: `manage_session` (send_message) |
-| `/sessions/{id}/activities` | GET | Resource: `jules://sessions/{id}/full` |
+These commands are aliases for `wrangler login` and `wrangler whoami`.
 
-### Additional Capabilities (Beyond API)
+## Deploy the Worker
 
-- **Local scheduling** - Cron-based task execution
-- **Schedule persistence** - Survives server restarts
-- **Execution history** - Audit trail for scheduled tasks
+Store the Jules API key as a Cloudflare secret:
 
-## Future Roadmap
+```bash
+npx wrangler secret put JULES_API_KEY
+```
 
-When Jules API adds native scheduling:
+Optional but recommended: restrict task creation to specific repositories.
 
-- The `schedule_recurring_task` tool will migrate from local cron to API calls
-- Existing local schedules can be migrated automatically
-- The MCP tool interface remains unchanged for backward compatibility
+```bash
+npx wrangler secret put JULES_ALLOWED_REPOS
+```
 
-## Resources
+Example value:
 
-- **Jules API Documentation**: <https://developers.google.com/jules/api>
-- **Jules Web Interface**: <https://jules.google>
-- **Model Context Protocol**: <https://modelcontextprotocol.io>
-- **MCP TypeScript SDK**: <https://github.com/modelcontextprotocol/typescript-sdk>
+```text
+my-org/api,my-org/web-app
+```
+
+Deploy:
+
+```bash
+npm run worker:deploy
+```
+
+Wrangler will return a URL similar to:
+
+```text
+https://<worker-name>.<account-subdomain>.workers.dev
+```
+
+At this point `/health` is available, while `/mcp` will remain unauthorized until Cloudflare Access is configured.
+
+## Protect `/mcp` with Cloudflare Access
+
+The recommended setup is a Cloudflare Access application in front of the Worker. Do not put a custom OAuth server inside this Worker.
+
+### 1. Create the Access application
+
+In Cloudflare Zero Trust:
+
+1. Go to **Access controls → Applications**.
+2. Select **Create new application**.
+3. Create a **Self-hosted** application.
+4. Add the Worker hostname as the public destination.
+5. Set the path to `mcp` so only `/mcp` is protected.
+6. Add an **Allow** policy for the users or groups that should be able to use the MCP server.
+
+Use generic values like:
+
+```text
+Hostname: <worker-name>.<account-subdomain>.workers.dev
+Path:     mcp
+```
+
+Keep `/health` outside the Access application so it remains a simple public health check.
+
+### 2. Enable Managed OAuth
+
+Edit the Access application and open **Additional / Advanced settings**.
+
+Enable **Managed OAuth**.
+
+For local MCP Inspector testing, you can also enable localhost and loopback redirect clients. Keep redirect rules as narrow as possible for production clients.
+
+Cloudflare documentation: <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/>
+
+### 3. Get the two Access values
+
+From your Zero Trust configuration, get:
+
+```text
+TEAM_DOMAIN=https://<team-name>.cloudflareaccess.com
+POLICY_AUD=<application-audience-tag>
+```
+
+`POLICY_AUD` must be the application's **Audience (AUD) Tag**. It is not the Access Policy ID.
+
+### 4. Bind Access to the Worker
+
+Store both values in Worker secrets:
+
+```bash
+npx wrangler secret put TEAM_DOMAIN
+npx wrangler secret put POLICY_AUD
+```
+
+Deploy again:
+
+```bash
+npm run worker:deploy
+```
+
+There is no separate application ID to hardcode in the project. The link between Access and the Worker is:
+
+```text
+MCP client
+  → Cloudflare Access / Managed OAuth
+  → protected Worker hostname + /mcp
+  → Cf-Access-Jwt-Assertion
+  → Worker validates TEAM_DOMAIN + POLICY_AUD
+  → Jules API using JULES_API_KEY
+```
+
+The Worker does not store an OAuth client secret.
+
+## Endpoints
+
+```text
+GET  /health   public health check
+POST /mcp      protected MCP Streamable HTTP endpoint
+```
+
+Example:
+
+```text
+https://<worker-name>.<account-subdomain>.workers.dev/mcp
+```
+
+## Verify the deployment
+
+Health check:
+
+```bash
+curl -i https://<worker-name>.<account-subdomain>.workers.dev/health
+```
+
+Then test the protected MCP endpoint with MCP Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector \
+  --server-url https://<worker-name>.<account-subdomain>.workers.dev/mcp \
+  --transport http
+```
+
+On WSL, if automatic browser opening is inconvenient:
+
+```bash
+MCP_AUTO_OPEN_ENABLED=false npx @modelcontextprotocol/inspector \
+  --server-url https://<worker-name>.<account-subdomain>.workers.dev/mcp \
+  --transport http
+```
+
+Open the localhost URL printed by Inspector in your Windows browser, complete the Cloudflare Access login, then verify:
+
+1. MCP connects successfully.
+2. `tools/list` returns the remote Jules tools.
+3. `list_sources` or `list_sessions` returns a successful Jules API response.
+
+## Security
+
+- `JULES_API_KEY` is read from Cloudflare Secrets only in the Worker deployment.
+- `/mcp` requires a valid Cloudflare Access JWT.
+- The Worker validates both the Access issuer (`TEAM_DOMAIN`) and application audience (`POLICY_AUD`).
+- Prompts and messages that look like secrets are rejected before they reach Jules.
+- `JULES_ALLOWED_REPOS` can limit which repositories may receive new coding tasks.
+- The Worker keeps no session state, token database, queue, or local schedule storage.
+
+## Development checks
+
+```bash
+npm ci
+npm run typecheck
+npm run worker:typecheck
+npm test
+npx wrangler deploy --dry-run
+```
+
+For local Worker development:
+
+```bash
+npm run worker:dev
+```
+
+See [Cloudflare remote MCP notes](docs/CLOUDFLARE_REMOTE_MCP.md) for additional implementation and deployment details.
+
+## References
+
+- Jules API: <https://developers.google.com/jules/api>
+- Jules: <https://jules.google>
+- Cloudflare Access Managed OAuth: <https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/>
+- Cloudflare Access for Workers: <https://developers.cloudflare.com/workers/configuration/cloudflare-access/>
+- Model Context Protocol: <https://modelcontextprotocol.io/>
 
 ## License
 
 MIT
-
-## Contributing
-
-This is an open-source implementation. Contributions welcome for:
-
-- Additional prompt templates
-- Enhanced error handling
-- Webhook support (when Jules API adds it)
-- Advanced scheduling features (conditional execution, dependency chains)
