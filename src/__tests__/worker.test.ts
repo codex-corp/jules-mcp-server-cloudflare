@@ -126,37 +126,59 @@ describe('Cloudflare Worker MCP tools', () => {
   it('rejects likely secrets in coding and repoless prompts', async () => {
     const client = await harness(env());
 
-    await expect(
-      client.callTool({
-        name: 'create_coding_task',
-        arguments: {
-          prompt: `Please fix this code using ${SECRET}`,
-          source: 'sources/github/acme/repo',
-        },
-      })
-    ).rejects.toThrow();
+    const coding = await client.callTool({
+      name: 'create_coding_task',
+      arguments: {
+        prompt: `Please fix this code using ${SECRET}`,
+        source: 'sources/github/acme/repo',
+      },
+    });
+    expect(coding.isError).toBe(true);
+    expect(coding.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Prompt contains potential secrets'),
+        }),
+      ])
+    );
 
-    await expect(
-      client.callTool({
-        name: 'create_repoless_task',
-        arguments: { prompt: `Research this credential ${SECRET}` },
-      })
-    ).rejects.toThrow();
+    const repoless = await client.callTool({
+      name: 'create_repoless_task',
+      arguments: { prompt: `Research this credential ${SECRET}` },
+    });
+    expect(repoless.isError).toBe(true);
+    expect(repoless.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Prompt contains potential secrets'),
+        }),
+      ])
+    );
   });
 
   it('rejects likely secrets in manage_session messages', async () => {
     const client = await harness(env());
 
-    await expect(
-      client.callTool({
-        name: 'manage_session',
-        arguments: {
-          session_id: 'session-1',
-          action: 'send_message',
-          message: `Use this credential ${SECRET}`,
-        },
-      })
-    ).rejects.toThrow();
+    const result = await client.callTool({
+      name: 'manage_session',
+      arguments: {
+        session_id: 'session-1',
+        action: 'send_message',
+        message: `Use this credential ${SECRET}`,
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Message contains potential secrets'),
+        }),
+      ])
+    );
   });
 
   it('enforces repository allowlist before Jules is called', async () => {
