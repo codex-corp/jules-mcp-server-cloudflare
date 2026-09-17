@@ -300,12 +300,19 @@ describe('Cloudflare Worker MCP tools', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      success: false,
+      error: {
+        code: 'AUTH_ERROR',
+        message: 'Failed to create Jules coding session.',
+        retryable: false,
+      },
+    });
     expect(result.content).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'text',
-          text: expect.stringContaining('Failed to create Jules coding session.'),
+          text: expect.stringContaining('AUTH_ERROR'),
         }),
       ])
     );
