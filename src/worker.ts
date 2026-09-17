@@ -28,9 +28,17 @@ const MAX_SESSION_TITLE_LENGTH = 160;
 const MAX_SESSION_PROMPT_LENGTH = 4000;
 const MAX_ACTIVITY_SUMMARY_LENGTH = 500;
 const MAX_ACTIVITY_PLAN_LENGTH = 4000;
+const MAX_ACTIVITY_DESCRIPTION_LENGTH = 1000;
 const MAX_MEDIA_DESCRIPTION_LENGTH = 500;
 const MAX_PULL_REQUESTS = 20;
 const MAX_CHANGED_FILES = 50;
+const MAX_SOURCE_BRANCHES = 100;
+const MAX_ARTIFACTS = 50;
+const MAX_BASH_COMMAND_LENGTH = 500;
+const MAX_BASH_OUTPUT_PREVIEW_LENGTH = 2000;
+const MAX_COMMIT_MESSAGE_LENGTH = 500;
+const DEFAULT_PATCH_CHUNK_LENGTH = 10000;
+const MAX_PATCH_CHUNK_LENGTH = 20000;
 
 const sessionIdSchema = z
   .string()
@@ -38,9 +46,15 @@ const sessionIdSchema = z
 
 const sourceNameSchema = z
   .string()
-  .regex(
-    /^sources\/github\/[\w-]+\/[\w-]+$/,
-    'Source must be in format sources/github/owner/repo'
+  .min(9)
+  .max(512)
+  .refine(
+    (value) =>
+      value.startsWith('sources/') &&
+      value.length > 'sources/'.length &&
+      !value.includes('?') &&
+      !value.includes('#'),
+    'Source must be a Jules resource name beginning with sources/'
   );
 
 const activityIdSchema = z
@@ -105,6 +119,19 @@ const getActivitiesSinceSchema = {
   cursor: z.string().min(1).max(1000).optional(),
 };
 
+const getActivityPatchSchema = {
+  session_id: sessionIdSchema,
+  activity_id: activityIdSchema,
+  change_set_index: z.number().int().min(0).max(999).default(0),
+  offset: z.number().int().min(0).default(0),
+  max_chars: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_PATCH_CHUNK_LENGTH)
+    .default(DEFAULT_PATCH_CHUNK_LENGTH),
+};
+
 const sessionListItemOutputSchema = z.object({
   id: z.string(),
   title: z.string().optional(),
@@ -142,12 +169,19 @@ const sessionDetailsOutputSchema = z.object({
   ),
 });
 
-const sourceOutputSchema = z.object({
+const sourceSummaryOutputSchema = z.object({
   name: z.string(),
+  id: z.string().optional(),
   owner: z.string().optional(),
   repo: z.string().optional(),
   htmlUrl: z.string().optional(),
+  isPrivate: z.boolean().optional(),
   defaultBranch: z.string().optional(),
+});
+
+const sourceDetailsValueOutputSchema = sourceSummaryOutputSchema.extend({
+  branches: z.array(z.string()),
+  branchesTruncated: z.boolean(),
 });
 
 const activitySummaryOutputSchema = z.object({
@@ -161,10 +195,22 @@ const activitySummaryOutputSchema = z.object({
   changedFiles: z.array(z.string()),
 });
 
+const artifactCountsOutputSchema = z.object({
+  changeSets: z.number().int(),
+  bashOutputs: z.number().int(),
+  media: z.number().int(),
+});
+
 const activityDetailsOutputSchema = activitySummaryOutputSchema.extend({
+  originator: z.string().optional(),
+  description: z.string().optional(),
+  failureReason: z.string().optional(),
+  planId: z.string().optional(),
   plan: z.string().optional(),
   progressPercentage: z.number().optional(),
   messageSender: z.string().optional(),
+  hasArtifacts: z.boolean(),
+  artifactCounts: artifactCountsOutputSchema,
   media: z
     .object({
       url: z.string().optional(),
@@ -172,6 +218,33 @@ const activityDetailsOutputSchema = activitySummaryOutputSchema.extend({
       description: z.string().optional(),
     })
     .optional(),
+});
+
+const changeSetArtifactOutputSchema = z.object({
+  index: z.number().int(),
+  source: z.string().optional(),
+  baseCommitId: z.string().optional(),
+  suggestedCommitMessage: z.string().optional(),
+  changedFiles: z.array(z.string()),
+  patchAvailable: z.boolean(),
+  patchChars: z.number().int(),
+});
+
+const bashArtifactOutputSchema = z.object({
+  index: z.number().int(),
+  command: z.string().optional(),
+  exitCode: z.number().int().optional(),
+  outputPreview: z.string().optional(),
+  outputTruncated: z.boolean(),
+  outputChars: z.number().int(),
+});
+
+const mediaArtifactOutputSchema = z.object({
+  index: z.number().int(),
+  url: z.string().optional(),
+  mimeType: z.string().optional(),
+  description: z.string().optional(),
+  dataAvailable: z.boolean(),
 });
 
 const toolErrorCodeSchema = z.enum([
@@ -246,6 +319,36 @@ const activityOutputSchema = z.object({
   error: toolErrorSchema.optional(),
 });
 
+const activityArtifactsOutputSchema = z.object({
+  success: z.boolean(),
+  activityId: z.string().optional(),
+  artifacts: z
+    .object({
+      changeSets: z.array(changeSetArtifactOutputSchema),
+      bashOutputs: z.array(bashArtifactOutputSchema),
+      media: z.array(mediaArtifactOutputSchema),
+      truncated: z.boolean(),
+    })
+    .optional(),
+  error: toolErrorSchema.optional(),
+});
+
+const activityPatchOutputSchema = z.object({
+  success: z.boolean(),
+  activityId: z.string().optional(),
+  changeSetIndex: z.number().int().optional(),
+  source: z.string().optional(),
+  baseCommitId: z.string().optional(),
+  suggestedCommitMessage: z.string().optional(),
+  changedFiles: z.array(z.string()).optional(),
+  patchChunk: z.string().optional(),
+  offset: z.number().int().optional(),
+  nextOffset: z.number().int().optional(),
+  hasMore: z.boolean().optional(),
+  totalChars: z.number().int().optional(),
+  error: toolErrorSchema.optional(),
+});
+
 const activitiesSinceOutputSchema = z.object({
   success: z.boolean(),
   sessionId: z.string().optional(),
@@ -258,14 +361,14 @@ const activitiesSinceOutputSchema = z.object({
 
 const listSourcesOutputSchema = z.object({
   success: z.boolean(),
-  sources: z.array(sourceOutputSchema).optional(),
+  sources: z.array(sourceSummaryOutputSchema).optional(),
   nextPageToken: z.string().optional(),
   error: toolErrorSchema.optional(),
 });
 
 const sourceDetailsOutputSchema = z.object({
   success: z.boolean(),
-  source: sourceOutputSchema.optional(),
+  source: sourceDetailsValueOutputSchema.optional(),
   error: toolErrorSchema.optional(),
 });
 
@@ -354,13 +457,24 @@ function sessionDetails(session: Session) {
   };
 }
 
-function normalizeSource(source: Source) {
+function sourceSummary(source: Source) {
   return {
     name: source.name,
+    id: source.id,
     owner: source.githubRepo?.owner,
     repo: source.githubRepo?.repo,
     htmlUrl: source.githubRepo?.htmlUrl,
+    isPrivate: source.githubRepo?.isPrivate,
     defaultBranch: source.githubRepo?.defaultBranch,
+  };
+}
+
+function sourceDetails(source: Source) {
+  const branches = source.githubRepo?.branches ?? [];
+  return {
+    ...sourceSummary(source),
+    branches: branches.slice(0, MAX_SOURCE_BRANCHES),
+    branchesTruncated: branches.length > MAX_SOURCE_BRANCHES,
   };
 }
 
@@ -370,7 +484,18 @@ function activityId(activity: Activity): string {
 }
 
 function activityChangeSet(activity: Activity) {
-  return activity.planGenerated?.changeSet ?? activity.sessionCompleted?.changeSet;
+  return (
+    activity.planGenerated?.changeSet ??
+    activity.sessionCompleted?.changeSet ??
+    activity.artifacts?.changeSets[0]
+  );
+}
+
+function changedFilesFor(changeSet: Activity['planGenerated'] extends infer _T ? import('./types/jules-api.js').ChangeSet | undefined : never) {
+  return (changeSet?.changes ?? [])
+    .map((change) => change.path)
+    .filter(Boolean)
+    .slice(0, MAX_CHANGED_FILES);
 }
 
 function summarizeActivity(activity: Activity) {
@@ -409,12 +534,34 @@ function summarizeActivity(activity: Activity) {
   };
 }
 
+function artifactCounts(activity: Activity) {
+  return {
+    changeSets: activity.artifacts?.changeSets.length ?? 0,
+    bashOutputs: activity.artifacts?.bashOutputs.length ?? 0,
+    media: activity.artifacts?.media.length ?? 0,
+  };
+}
+
 function activityDetails(activity: Activity) {
+  const counts = artifactCounts(activity);
   return {
     ...summarizeActivity(activity),
+    originator: activity.originator,
+    description: truncateText(
+      activity.description,
+      MAX_ACTIVITY_DESCRIPTION_LENGTH
+    ),
+    failureReason: truncateText(
+      activity.failureReason,
+      MAX_ACTIVITY_DESCRIPTION_LENGTH
+    ),
+    planId: activity.planApproved?.planId ?? activity.planGenerated?.planId,
     plan: truncateText(activity.planGenerated?.plan, MAX_ACTIVITY_PLAN_LENGTH),
     progressPercentage: activity.progressUpdated?.percentage,
     messageSender: activity.messageSent?.sender,
+    hasArtifacts:
+      counts.changeSets > 0 || counts.bashOutputs > 0 || counts.media > 0,
+    artifactCounts: counts,
     media: activity.media
       ? {
           url: activity.media.url,
@@ -425,6 +572,102 @@ function activityDetails(activity: Activity) {
           ),
         }
       : undefined,
+  };
+}
+
+function activityArtifacts(activity: Activity) {
+  const changeSets = (activity.artifacts?.changeSets ?? [])
+    .slice(0, MAX_ARTIFACTS)
+    .map((changeSet, index) => ({
+      index,
+      source: changeSet.source,
+      baseCommitId: changeSet.baseCommitId,
+      suggestedCommitMessage: truncateText(
+        changeSet.suggestedCommitMessage,
+        MAX_COMMIT_MESSAGE_LENGTH
+      ),
+      changedFiles: (changeSet.changes ?? [])
+        .map((change) => change.path)
+        .filter(Boolean)
+        .slice(0, MAX_CHANGED_FILES),
+      patchAvailable: Boolean(changeSet.patch),
+      patchChars: changeSet.patch?.length ?? 0,
+    }));
+
+  const bashOutputs = (activity.artifacts?.bashOutputs ?? [])
+    .slice(0, MAX_ARTIFACTS)
+    .map((bashOutput, index) => {
+      const output = bashOutput.output ?? '';
+      return {
+        index,
+        command: truncateText(bashOutput.command, MAX_BASH_COMMAND_LENGTH),
+        exitCode: bashOutput.exitCode,
+        outputPreview: truncateText(output, MAX_BASH_OUTPUT_PREVIEW_LENGTH),
+        outputTruncated: output.length > MAX_BASH_OUTPUT_PREVIEW_LENGTH,
+        outputChars: output.length,
+      };
+    });
+
+  const media = (activity.artifacts?.media ?? [])
+    .slice(0, MAX_ARTIFACTS)
+    .map((artifact, index) => ({
+      index,
+      url: artifact.url,
+      mimeType: artifact.mimeType,
+      description: truncateText(
+        artifact.description,
+        MAX_MEDIA_DESCRIPTION_LENGTH
+      ),
+      dataAvailable: Boolean(artifact.dataAvailable),
+    }));
+
+  const artifacts = activity.artifacts;
+  const truncated = Boolean(
+    artifacts &&
+      (artifacts.changeSets.length > MAX_ARTIFACTS ||
+        artifacts.bashOutputs.length > MAX_ARTIFACTS ||
+        artifacts.media.length > MAX_ARTIFACTS)
+  );
+
+  return { changeSets, bashOutputs, media, truncated };
+}
+
+function activityPatch(
+  activity: Activity,
+  changeSetIndex: number,
+  offset: number,
+  maxChars: number
+) {
+  const changeSet = activity.artifacts?.changeSets[changeSetIndex];
+  if (!changeSet) {
+    throw new JulesAPIError('Activity change set not found.', 404);
+  }
+
+  const patch = changeSet.patch ?? '';
+  const safeOffset = Math.min(offset, patch.length);
+  const patchChunk = patch.slice(safeOffset, safeOffset + maxChars);
+  const nextOffset = safeOffset + patchChunk.length;
+  const hasMore = nextOffset < patch.length;
+
+  return {
+    success: true,
+    activityId: activityId(activity),
+    changeSetIndex,
+    source: changeSet.source,
+    baseCommitId: changeSet.baseCommitId,
+    suggestedCommitMessage: truncateText(
+      changeSet.suggestedCommitMessage,
+      MAX_COMMIT_MESSAGE_LENGTH
+    ),
+    changedFiles: (changeSet.changes ?? [])
+      .map((change) => change.path)
+      .filter(Boolean)
+      .slice(0, MAX_CHANGED_FILES),
+    patchChunk,
+    offset: safeOffset,
+    nextOffset: hasMore ? nextOffset : undefined,
+    hasMore,
+    totalChars: patch.length,
   };
 }
 
@@ -528,18 +771,30 @@ function errorResult(error: unknown, fallbackMessage: string) {
   };
 }
 
-export function validateRepository(source: string, allowlist?: string): void {
-  if (!allowlist) return;
+function hasRepositoryAllowlist(allowlist?: string): boolean {
+  return Boolean(
+    allowlist
+      ?.split(',')
+      .map((repo) => repo.trim())
+      .some(Boolean)
+  );
+}
 
-  const allowed = allowlist
+export function validateRepository(source: Source, allowlist?: string): void {
+  if (!hasRepositoryAllowlist(allowlist)) return;
+
+  const repository = source.githubRepo;
+  if (!repository?.owner || !repository.repo) {
+    throw new Error('Repository is not authorized for this MCP server.');
+  }
+
+  const allowed = (allowlist ?? '')
     .split(',')
-    .map((repo) => repo.trim())
+    .map((repo) => repo.trim().toLowerCase())
     .filter(Boolean);
+  const resolvedRepository = `${repository.owner}/${repository.repo}`.toLowerCase();
 
-  if (allowed.length === 0) return;
-
-  const repository = source.replace(/^sources\/github\//, '');
-  if (!allowed.includes(repository)) {
+  if (!allowed.includes(resolvedRepository)) {
     throw new Error('Repository is not authorized for this MCP server.');
   }
 }
@@ -572,8 +827,12 @@ export function createJulesMcpServer(env: Env): McpServer {
     },
     async (args) => {
       try {
-        validateRepository(args.source, env.JULES_ALLOWED_REPOS);
         const client = createJulesClient(env);
+        if (hasRepositoryAllowlist(env.JULES_ALLOWED_REPOS)) {
+          const resolvedSource = await client.getSource(args.source);
+          validateRepository(resolvedSource, env.JULES_ALLOWED_REPOS);
+        }
+
         const session = await client.createSession({
           prompt: args.prompt,
           sourceContext: {
@@ -750,7 +1009,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'list_activities',
     {
       description:
-        'List compact activities for a Jules session without returning large code patches.',
+        'List compact activities for a Jules session without returning large code patches or artifact payloads.',
       inputSchema: {
         session_id: sessionIdSchema,
         page_size: z.number().int().min(1).max(100).default(DEFAULT_PAGE_SIZE),
@@ -781,7 +1040,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_activity',
     {
       description:
-        'Get one Jules activity with bounded details and changed file names, not raw patches.',
+        'Get one Jules activity with bounded details and artifact counts, not raw patches or full command output.',
       inputSchema: {
         session_id: sessionIdSchema,
         activity_id: activityIdSchema,
@@ -798,6 +1057,65 @@ export function createJulesMcpServer(env: Env): McpServer {
         return jsonResult({ success: true, activity: activityDetails(activity) });
       } catch (error) {
         return errorResult(error, 'Failed to get Jules activity.');
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_activity_artifacts',
+    {
+      description:
+        'Get bounded metadata for one activity artifact set, including changed files and command-output previews but not raw patches or embedded media bytes.',
+      inputSchema: {
+        session_id: sessionIdSchema,
+        activity_id: activityIdSchema,
+      },
+      outputSchema: activityArtifactsOutputSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async ({ session_id, activity_id }) => {
+      try {
+        const activity = await createJulesClient(env).getActivity(
+          session_id,
+          activity_id
+        );
+        return jsonResult({
+          success: true,
+          activityId: activityId(activity),
+          artifacts: activityArtifacts(activity),
+        });
+      } catch (error) {
+        return errorResult(error, 'Failed to get Jules activity artifacts.');
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_activity_patch',
+    {
+      description:
+        'Get an explicit bounded chunk of one activity code patch. Continue with nextOffset while hasMore is true.',
+      inputSchema: getActivityPatchSchema,
+      outputSchema: activityPatchOutputSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async ({
+      session_id,
+      activity_id,
+      change_set_index,
+      offset,
+      max_chars,
+    }) => {
+      try {
+        const activity = await createJulesClient(env).getActivity(
+          session_id,
+          activity_id
+        );
+        return jsonResult(
+          activityPatch(activity, change_set_index, offset, max_chars)
+        );
+      } catch (error) {
+        return errorResult(error, 'Failed to get Jules activity patch.');
       }
     }
   );
@@ -836,7 +1154,8 @@ export function createJulesMcpServer(env: Env): McpServer {
   server.registerTool(
     'list_sources',
     {
-      description: 'List GitHub repositories connected to Jules.',
+      description:
+        'List compact GitHub repository sources connected to Jules. Use get_source_details for branches.',
       inputSchema: paginationSchema,
       outputSchema: listSourcesOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -849,7 +1168,7 @@ export function createJulesMcpServer(env: Env): McpServer {
         );
         return jsonResult({
           success: true,
-          sources: result.sources.map(normalizeSource),
+          sources: result.sources.map(sourceSummary),
           nextPageToken: result.nextPageToken,
         });
       } catch (error) {
@@ -861,7 +1180,8 @@ export function createJulesMcpServer(env: Env): McpServer {
   server.registerTool(
     'get_source_details',
     {
-      description: 'Get details for a repository source connected to Jules.',
+      description:
+        'Get repository identity, privacy, default branch, and bounded active branch names for a Jules source.',
       inputSchema: { source_name: sourceNameSchema },
       outputSchema: sourceDetailsOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -869,7 +1189,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     async ({ source_name }) => {
       try {
         const source = await createJulesClient(env).getSource(source_name);
-        return jsonResult({ success: true, source: normalizeSource(source) });
+        return jsonResult({ success: true, source: sourceDetails(source) });
       } catch (error) {
         return errorResult(error, 'Failed to get Jules source.');
       }
