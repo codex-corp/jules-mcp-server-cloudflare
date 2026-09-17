@@ -23,12 +23,16 @@ export class RateLimitError extends Error {
  * Ensures that operations are only performed on authorized repositories.
  */
 export class RepositoryValidator {
-  /** The list of allowed repositories, or null if no allowlist is configured. */
+  /**
+   * The list of allowed repositories, or null if no allowlist is configured.
+   */
   private static allowedRepos: string[] | null = null;
 
   /**
-   * Initializes the validator with allowed repositories from the Node environment.
-   * @returns No return value.
+   * Initializes the validator with allowed repositories from the environment.
+   * Reads the JULES_ALLOWED_REPOS environment variable to set up the allowlist.
+   *
+   * @returns {void} No return value.
    */
   static initialize(): void {
     const allowList = process.env.JULES_ALLOWED_REPOS;
@@ -42,14 +46,18 @@ export class RepositoryValidator {
 
   /**
    * Validates that a repository is allowed to be accessed.
-   * @param source - Source repository in sources/github/owner/repo format.
-   * @returns No return value.
+   *
+   * @param source - The source repository string in the format "sources/github/owner/repo"
+   * @returns {void} No return value.
+   * @throws {Error} if the source format is invalid or if the repository is not in the allowlist.
    */
   static validateRepository(source: string): void {
+    // If no allowlist is configured, allow all repositories (opt-in security)
     if (!this.allowedRepos || this.allowedRepos.length === 0) {
       return;
     }
 
+    // Extract owner/repo from source format: sources/github/owner/repo
     const match = /^sources\/github\/(.+)$/.exec(source);
     if (!match) {
       throw new Error(
@@ -58,6 +66,7 @@ export class RepositoryValidator {
     }
 
     const repoPath = match[1];
+
     if (!this.allowedRepos.includes(repoPath)) {
       throw new SecurityError(
         `Security Error: Repository "${repoPath}" is not in the allowed list. ` +
@@ -68,7 +77,8 @@ export class RepositoryValidator {
 
   /**
    * Checks if an allowlist is currently configured and enabled.
-   * @returns True if an allowlist is configured.
+   *
+   * @returns {boolean} True if an allowlist is configured, false otherwise.
    */
   static isAllowlistEnabled(): boolean {
     return this.allowedRepos !== null && this.allowedRepos.length > 0;
@@ -76,7 +86,8 @@ export class RepositoryValidator {
 
   /**
    * Gets the list of currently allowed repositories.
-   * @returns Copy of the configured repositories, or null.
+   *
+   * @returns {string[] | null} The list of currently allowed repositories, or null if no allowlist is configured.
    */
   static getAllowedRepositories(): string[] | null {
     return this.allowedRepos ? [...this.allowedRepos] : null;
@@ -84,19 +95,24 @@ export class RepositoryValidator {
 }
 
 /**
- * Truncates text to a specified maximum length at a nearby word boundary.
- * @param text - Text to truncate.
- * @param maxLength - Maximum length.
- * @returns Truncated string.
+ * Utility for safe string truncation at word boundaries.
+ * Truncates text to a specified maximum length, prioritizing breaking at spaces to avoid cutting words in half.
+ *
+ * @param text - The text to truncate.
+ * @param maxLength - The maximum length of the string.
+ * @returns {string} The truncated string, with "..." appended if it was truncated.
  */
 export function smartTruncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) {
     return text;
   }
 
+  // Try to break at a word boundary
   let truncated = text.substring(0, maxLength);
   const lastSpace = truncated.lastIndexOf(' ');
+
   if (lastSpace > maxLength * 0.8) {
+    // If we can break at a word within 80% of max length, do it
     truncated = truncated.substring(0, lastSpace);
   }
 
@@ -105,11 +121,13 @@ export function smartTruncate(text: string, maxLength: number): string {
 
 /**
  * Retries an asynchronous operation with exponential backoff.
+ *
  * @template T
- * @param fn - Async function to retry.
- * @param maxRetries - Maximum number of attempts.
- * @param baseDelay - Base delay in milliseconds.
- * @returns Operation result.
+ * @param fn - The async function to retry.
+ * @param maxRetries - The maximum number of retries. Defaults to 3.
+ * @param baseDelay - The base delay in milliseconds. Defaults to 1000.
+ * @returns {Promise<T>} A promise that resolves with the result of the function.
+ * @throws {Error} The last error encountered if all retries fail.
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
@@ -123,6 +141,7 @@ export async function retryWithBackoff<T>(
       return await fn();
     } catch (error) {
       lastError = error as Error;
+
       if (attempt < maxRetries - 1) {
         const delay = baseDelay * Math.pow(2, attempt);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -133,24 +152,26 @@ export async function retryWithBackoff<T>(
   throw lastError!;
 }
 
-/** Simple in-memory rate limiter for the local Node server. */
+/**
+ * A simple in-memory rate limiter to prevent abuse.
+ */
 export class RateLimiter {
   private timestamps: number[] = [];
+  private readonly maxRequests: number;
+  private readonly timeWindowMs: number;
 
-  constructor(
-    private readonly maxRequests: number,
-    private readonly timeWindowMs: number
-  ) {}
+  constructor(maxRequests: number, timeWindowMs: number) {
+    this.maxRequests = maxRequests;
+    this.timeWindowMs = timeWindowMs;
+  }
 
   /**
-   * Checks whether another request is allowed.
-   * @returns True when allowed.
+   * Checks if a request is allowed according to the rate limit.
+   * @returns {boolean} True if allowed, false if rate limit exceeded.
    */
   isAllowed(): boolean {
     const now = Date.now();
-    this.timestamps = this.timestamps.filter(
-      (timestamp) => now - timestamp < this.timeWindowMs
-    );
+    this.timestamps = this.timestamps.filter(t => now - t < this.timeWindowMs);
     if (this.timestamps.length >= this.maxRequests) {
       return false;
     }
