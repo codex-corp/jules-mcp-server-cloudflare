@@ -4,7 +4,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 
 import { JulesAPIError, JulesClient } from './api/jules-client.js';
-import type { Activity, Session, Source } from './types/jules-api.js';
+import type { Activity, ChangeSet, Session, Source } from './types/jules-api.js';
 import { containsSecret } from './utils/secret-detection.js';
 
 export interface Env {
@@ -491,7 +491,7 @@ function activityChangeSet(activity: Activity) {
   );
 }
 
-function changedFilesFor(changeSet: Activity['planGenerated'] extends infer _T ? import('./types/jules-api.js').ChangeSet | undefined : never) {
+function changedFilesFor(changeSet: ChangeSet | undefined) {
   return (changeSet?.changes ?? [])
     .map((change) => change.path)
     .filter(Boolean)
@@ -500,10 +500,7 @@ function changedFilesFor(changeSet: Activity['planGenerated'] extends infer _T ?
 
 function summarizeActivity(activity: Activity) {
   const changeSet = activityChangeSet(activity);
-  const changedFiles = (changeSet?.changes ?? [])
-    .map((change) => change.path)
-    .filter(Boolean)
-    .slice(0, MAX_CHANGED_FILES);
+  const changedFiles = changedFilesFor(changeSet);
 
   const summary =
     truncateText(
@@ -586,10 +583,7 @@ function activityArtifacts(activity: Activity) {
         changeSet.suggestedCommitMessage,
         MAX_COMMIT_MESSAGE_LENGTH
       ),
-      changedFiles: (changeSet.changes ?? [])
-        .map((change) => change.path)
-        .filter(Boolean)
-        .slice(0, MAX_CHANGED_FILES),
+      changedFiles: changedFilesFor(changeSet),
       patchAvailable: Boolean(changeSet.patch),
       patchChars: changeSet.patch?.length ?? 0,
     }));
@@ -659,10 +653,7 @@ function activityPatch(
       changeSet.suggestedCommitMessage,
       MAX_COMMIT_MESSAGE_LENGTH
     ),
-    changedFiles: (changeSet.changes ?? [])
-      .map((change) => change.path)
-      .filter(Boolean)
-      .slice(0, MAX_CHANGED_FILES),
+    changedFiles: changedFilesFor(changeSet),
     patchChunk,
     offset: safeOffset,
     nextOffset: hasMore ? nextOffset : undefined,
