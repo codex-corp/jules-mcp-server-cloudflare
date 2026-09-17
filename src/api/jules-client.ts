@@ -479,17 +479,43 @@ export class JulesClient {
    * Return activities newer than the supplied timestamp. The live Jules v1alpha
    * API currently rejects createTime as a query parameter, even though an example
    * in the public docs shows it. Use the supported pageSize/pageToken contract,
-   * normalize all fetched pages, then filter locally by activity timestamp.
+   * normalize all fetched pages, then filter locally by activity timestamp. An
+   * opaque cursor continues a bounded result without silently dropping matches.
+   *
+   * @param sessionId - Jules session identifier.
+   * @param since - Exclusive ISO 8601 lower-bound timestamp.
+   * @param pageSize - Maximum number of matching activities to return.
+   * @param cursor - Optional opaque continuation cursor from a previous response.
+   * @returns A bounded activity page plus continuation metadata.
    */
   async listActivitiesSince(
     sessionId: string,
     since: string,
-    pageSize = 50
+    pageSize = 50,
+    cursor?: string
   ): Promise<ListActivitiesResponse> {
     const endpoint = `/sessions/${sessionId}/activities`;
     const sinceTime = Date.parse(since);
     if (!Number.isFinite(sinceTime)) {
       throw new JulesAPIError('Invalid activity since timestamp.', 400);
+    }
+
+    let cursorTime = Number.NEGATIVE_INFINITY;
+    let cursorName = '';
+    if (cursor) {
+      const separator = cursor.indexOf('|');
+      if (separator <= 0 || separator === cursor.length - 1) {
+        throw new JulesAPIError('Invalid activity continuation cursor.', 400);
+      }
+      cursorTime = Number(cursor.slice(0, separator));
+      try {
+        cursorName = decodeURIComponent(cursor.slice(separator + 1));
+      } catch {
+        throw new JulesAPIError('Invalid activity continuation cursor.', 400);
+      }
+      if (!Number.isFinite(cursorTime) || !cursorName) {
+        throw new JulesAPIError('Invalid activity continuation cursor.', 400);
+      }
     }
 
     const upstreamPageSize = 100;
@@ -530,17 +556,48 @@ export class JulesClient {
       matchingActivities.sort((left, right) => {
         const leftTime = left.timestamp ? Date.parse(left.timestamp) : 0;
         const rightTime = right.timestamp ? Date.parse(right.timestamp) : 0;
-        return leftTime - rightTime;
+        if (leftTime !== rightTime) return leftTime - rightTime;
+        return left.name.localeCompare(right.name);
       });
 
+      const remainingActivities = matchingActivities.filter((activity) => {
+        const activityTime = activity.timestamp
+          ? Date.parse(activity.timestamp)
+          : Number.NaN;
+        if (!Number.isFinite(activityTime)) return false;
+        return (
+          activityTime > cursorTime ||
+          (activityTime === cursorTime && activity.name > cursorName)
+        );
+      });
+
+      const activities = remainingActivities.slice(0, pageSize);
+      const hasMore = remainingActivities.length > activities.length;
+      const lastActivity = activities.at(-1);
+      const lastTime = lastActivity?.timestamp
+        ? Date.parse(lastActivity.timestamp)
+        : Number.NaN;
+      const nextCursor =
+        hasMore && lastActivity && Number.isFinite(lastTime)
+          ? `${lastTime}|${encodeURIComponent(lastActivity.name)}`
+          : undefined;
+
       return {
-        activities: matchingActivities.slice(0, pageSize),
+        activities,
+        hasMore,
+        nextCursor,
       };
     } catch (error) {
       this.logActivityFailure(
         'listActivitiesSince',
         endpoint,
-        { sessionId, since, pageSize, pagesScanned },
+        {
+          sessionId,
+          since,
+          pageSize,
+          hasCursor: Boolean(cursor),
+          pagesScanned,
+        },
         error
       );
       throw error;
