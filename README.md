@@ -24,7 +24,7 @@ Remote Worker tools:
 | --- | --- |
 | Create | `create_coding_task`, `create_repoless_task` |
 | Sessions | `list_sessions`, `get_session_status`, `get_session_details`, `manage_session`, `delete_session` |
-| Activities | `list_activities`, `get_activity`, `get_activity_artifacts`, `get_activity_patch`, `get_activities_since` |
+| Activities | `list_activities`, `get_activity`, `get_activity_content`, `get_activity_artifacts`, `get_activity_patch`, `get_activities_since` |
 | Sources | `list_sources`, `get_source_details` |
 
 All remote tools advertise an MCP `outputSchema` so clients such as ChatGPT can consume structured results. List tools return compact summaries instead of forwarding raw Jules payloads or large code patches; use the focused `get_*` tools when you need details for one item.
@@ -35,7 +35,11 @@ All remote list-style inputs follow the Jules API maximum page size of 100. `get
 
 Source resource names are treated as Jules resource identifiers rather than parsed as repository identity. `list_sources` stays compact, while `get_source_details` can return the normalized source id, repository owner/name, privacy flag, default branch, and up to 100 active branch display names. When `JULES_ALLOWED_REPOS` is enabled, task creation resolves the source through Jules and validates the returned GitHub owner/repository pair against the allowlist.
 
-Activity list and detail calls do not return raw code patches, full command output, or embedded media bytes. `get_activity_artifacts` returns bounded artifact metadata, changed-file names, command-output previews, and media metadata. Raw code patches are available only through the explicit `get_activity_patch` tool, which returns bounded chunks and continuation offsets. Embedded media data is never returned by the remote MCP surface.
+Activity list and bounded detail calls do not return raw code patches, full command output, embedded media bytes, or arbitrarily long message bodies. `get_activity_content` is the explicit lossless text-retrieval path for agent messages, generated plans, user messages, progress text, completion text, failure reasons, and activity descriptions. It returns at most 20,000 Unicode code points per call and exposes `nextOffset`, `hasMore`, and `totalChars` so clients can reassemble long text exactly without splitting surrogate pairs. Agent-message sanitation is applied before content is exposed.
+
+`get_activity_artifacts` returns bounded artifact metadata, changed-file names, command-output previews, and media metadata. Raw code patches are available only through the explicit `get_activity_patch` tool, which returns bounded chunks and continuation offsets. Embedded media data is never returned by the remote MCP surface.
+
+The remote MCP does not invent a separate "final result" state. Session lifecycle should continue to use Jules' session state, while callers retrieve the specific activity text they need with `get_activity_content`. This avoids guessing which agent message is final when a session contains multiple responses.
 
 The remote Worker intentionally does not expose the local scheduler or polling/wait tools.
 
@@ -238,6 +242,7 @@ Open the localhost URL printed by Inspector in your Windows browser, complete th
 - The Worker validates both the Access issuer (`TEAM_DOMAIN`) and application audience (`POLICY_AUD`).
 - Prompts and messages that look like secrets are rejected before they reach Jules.
 - `JULES_ALLOWED_REPOS` can limit which repositories may receive new coding tasks; authorization uses the GitHub owner/repository identity returned by Jules rather than trusting the source resource-name text.
+- Long activity text remains excluded from list calls; lossless retrieval requires the explicit bounded `get_activity_content` tool.
 - Raw activity patches and full command output are excluded from list/detail tools; patch retrieval requires the explicit chunked `get_activity_patch` tool.
 - Embedded media bytes are not exposed through the remote MCP tools.
 - The Worker keeps no session state, token database, queue, or local schedule storage.
@@ -248,6 +253,7 @@ Open the localhost URL printed by Inspector in your Windows browser, complete th
 npm ci
 npm run typecheck
 npm run worker:typecheck
+npm run lint
 npm test
 npx wrangler deploy --dry-run
 ```
