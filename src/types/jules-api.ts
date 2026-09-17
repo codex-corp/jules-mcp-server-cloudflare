@@ -8,18 +8,24 @@
  * Raw Jules source DTOs are normalized by JulesClient before they reach callers.
  */
 export interface Source {
-  /** Resource name format: sources/github/{owner}/{repo} */
+  /** Opaque Jules resource name in the form sources/{source}. */
   name: string;
-  /** GitHub repository details */
+  /** Stable source identifier when Jules provides one. */
+  id?: string;
+  /** GitHub repository details. */
   githubRepo?: {
     /** The owner of the GitHub repository. */
     owner: string;
     /** The name of the GitHub repository. */
     repo: string;
-    /** The HTML URL of the GitHub repository. */
-    htmlUrl: string;
+    /** Optional HTML URL retained for compatibility with live Jules responses. */
+    htmlUrl?: string;
+    /** Whether the repository is private. */
+    isPrivate?: boolean;
     /** Normalized default branch name when Jules provides one. */
     defaultBranch?: string;
+    /** Normalized active branch names when Jules provides them. */
+    branches?: string[];
   };
 }
 
@@ -37,7 +43,7 @@ export interface ListSourcesResponse {
  * Context for a GitHub repository.
  */
 interface GitHubRepoContext {
-  /** Branch to base changes on */
+  /** Branch to base changes on. */
   startingBranch: string;
 }
 
@@ -45,7 +51,7 @@ interface GitHubRepoContext {
  * Context for a source repository.
  */
 export interface SourceContext {
-  /** Resource name of the source */
+  /** Opaque resource name of the source. */
   source: string;
   /** GitHub repository context details. */
   githubRepoContext?: GitHubRepoContext;
@@ -61,17 +67,11 @@ export type AutomationMode =
   | 'AUTOMATION_MODE_UNSPECIFIED';
 
 /**
- * State of a session.
- * - `SESSION_STATE_UNSPECIFIED`: Unspecified state.
- * - `QUEUED`: Session is queued.
- * - `PLANNING`: Session is planning the changes.
- * - `AWAITING_PLAN_APPROVAL`: Session is waiting for plan approval.
- * - `IN_PROGRESS`: Session is in progress.
- * - `COMPLETED`: Session has completed.
- * - `FAILED`: Session has failed.
- * - `CANCELED`: Session was canceled.
+ * State of a session. Compatibility values are retained for live/legacy API
+ * responses even when the current public reference does not list every value.
  */
 export type SessionState =
+  | 'STATE_UNSPECIFIED'
   | 'SESSION_STATE_UNSPECIFIED'
   | 'QUEUED'
   | 'PLANNING'
@@ -87,37 +87,37 @@ export type SessionState =
  * Represents a Jules session.
  */
 export interface Session {
-  /** Resource name format: sessions/{id} */
+  /** Resource name format: sessions/{id}. */
   name: string;
-  /** Unique session identifier */
+  /** Unique session identifier. */
   id: string;
-  /** Optional human-readable title */
+  /** Optional human-readable title. */
   title?: string;
-  /** Optional monitor URL returned by the Jules API */
+  /** Optional monitor URL returned by the Jules API. */
   url?: string;
-  /** Source context for the session */
+  /** Source context for the session. */
   sourceContext?: SourceContext;
-  /** Natural language task prompt */
+  /** Natural language task prompt. */
   prompt: string;
-  /** Current session state */
+  /** Current session state. */
   state?: SessionState;
-  /** Automation configuration */
+  /** Automation configuration. */
   automationMode?: AutomationMode;
-  /** Whether plan approval is required */
+  /** Whether plan approval is required. */
   requirePlanApproval?: boolean;
-  /** Timestamp when created */
+  /** Timestamp when created. */
   createTime?: string;
-  /** Timestamp when last updated */
+  /** Timestamp when last updated. */
   updateTime?: string;
-  /** Session outputs such as generated pull requests */
+  /** Session outputs such as generated pull requests. */
   outputs?: {
-    /** Pull request created by the session, if available */
+    /** Pull request created by the session, if available. */
     pullRequest?: {
-      /** Pull request URL */
+      /** Pull request URL. */
       url: string;
-      /** Optional pull request title */
+      /** Optional pull request title. */
       title?: string;
-      /** Optional pull request description */
+      /** Optional pull request description. */
       description?: string;
     };
   }[];
@@ -127,15 +127,15 @@ export interface Session {
  * Request object for creating a new session.
  */
 export interface CreateSessionRequest {
-  /** Natural language task prompt */
+  /** Natural language task prompt. */
   prompt: string;
-  /** Source context for the session */
+  /** Source context for the session. */
   sourceContext?: SourceContext;
-  /** Optional human-readable title */
+  /** Optional human-readable title. */
   title?: string;
-  /** Automation configuration */
+  /** Automation configuration. */
   automationMode?: AutomationMode;
-  /** Whether plan approval is required */
+  /** Whether plan approval is required. */
   requirePlanApproval?: boolean;
 }
 
@@ -163,12 +163,18 @@ export type ActivityType =
   | 'ACTIVITY_TYPE_UNSPECIFIED';
 
 /**
- * Represents a set of changes in a plan.
+ * Represents a set of code changes.
  */
 export interface ChangeSet {
-  /** Unified patch for the full change set */
+  /** Source resource the changes apply to. */
+  source?: string;
+  /** Commit the patch should be applied to. */
+  baseCommitId?: string;
+  /** Suggested commit message from Jules. */
+  suggestedCommitMessage?: string;
+  /** Unified patch for the full change set. Kept internal to explicit patch tools. */
   patch?: string;
-  /** Array of file changes */
+  /** Array of file changes. */
   changes?: {
     /** The path of the file changed. */
     path: string;
@@ -182,20 +188,68 @@ export interface ChangeSet {
 }
 
 /**
+ * Normalized bash artifact retained for explicit artifact inspection tools.
+ */
+export interface BashOutputArtifact {
+  /** Command that Jules executed. */
+  command?: string;
+  /** Combined stdout/stderr. Kept internal to bounded artifact output. */
+  output?: string;
+  /** Process exit code. */
+  exitCode?: number;
+}
+
+/**
+ * Normalized media artifact metadata. Base64 data is intentionally never retained.
+ */
+export interface MediaArtifact {
+  /** Optional remote media URL. */
+  url?: string;
+  /** Media MIME type. */
+  mimeType?: string;
+  /** Optional human-readable description. */
+  description?: string;
+  /** Whether the upstream artifact included embedded data. */
+  dataAvailable?: boolean;
+}
+
+/**
+ * Artifact collection attached to a normalized activity.
+ */
+export interface ActivityArtifacts {
+  /** Code change artifacts. */
+  changeSets: ChangeSet[];
+  /** Bash command outputs. */
+  bashOutputs: BashOutputArtifact[];
+  /** Media metadata without base64 payloads. */
+  media: MediaArtifact[];
+}
+
+/**
  * Normalized activity consumed by local tools and the Worker adapter.
  * JulesClient converts the current upstream Activity DTO into this stable shape.
  */
 export interface Activity {
-  /** Resource name format: sessions/{session_id}/activities/{activity_id} */
+  /** Resource name format: sessions/{session_id}/activities/{activity_id}. */
   name: string;
-  /** Activity type */
+  /** Activity type. */
   type: ActivityType;
-  /** Timestamp when activity occurred */
+  /** Entity that created the activity when Jules provides it. */
+  originator?: string;
+  /** Human-readable upstream description. */
+  description?: string;
+  /** Timestamp when activity occurred. */
   timestamp?: string;
-  /** Activity-specific payload */
+  /** Failure reason for SESSION_FAILED activities. */
+  failureReason?: string;
+  /** Normalized activity artifacts for explicit detail tools. */
+  artifacts?: ActivityArtifacts;
+  /** Activity-specific payload. */
   planGenerated?: {
     /** The generated plan description. */
     plan: string;
+    /** Plan identifier when Jules provides one. */
+    planId?: string;
     /** The set of changes proposed in the plan. */
     changeSet?: ChangeSet;
   };
@@ -216,14 +270,16 @@ export interface Activity {
     changeSet?: ChangeSet;
   };
   messageSent?: {
-    /** The message content to send. */
+    /** The message content. */
     prompt: string;
     /** The sender of the message. */
     sender: 'USER' | 'AGENT';
   };
   planApproved?: {
-    /** When the plan was approved. */
-    approvedAt: string;
+    /** ID of the approved plan. */
+    planId?: string;
+    /** When the plan was approved, if known. */
+    approvedAt?: string;
   };
   agentMessaged?: {
     /** Agent-authored message requiring user attention. */
