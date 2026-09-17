@@ -3,7 +3,7 @@ import { createMcpHandler } from 'agents/mcp/server';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 
-import { JulesClient } from './api/jules-client.js';
+import { JulesAPIError, JulesClient } from './api/jules-client.js';
 import type { Activity, Session, Source } from './types/jules-api.js';
 import { containsSecret } from './utils/secret-detection.js';
 
@@ -154,64 +154,91 @@ const activityDetailsOutputSchema = activitySummaryOutputSchema.extend({
     .optional(),
 });
 
+const toolErrorCodeSchema = z.enum([
+  'AUTH_ERROR',
+  'NOT_FOUND',
+  'RATE_LIMITED',
+  'UPSTREAM_TIMEOUT',
+  'JULES_UPSTREAM_ERROR',
+  'RESPONSE_VALIDATION_ERROR',
+]);
+
+const toolErrorSchema = z.object({
+  code: toolErrorCodeSchema,
+  message: z.string(),
+  retryable: z.boolean(),
+  upstream_status: z.number().int().optional(),
+  upstream_code: z.union([z.string(), z.number()]).optional(),
+});
+
 const createSessionOutputSchema = z.object({
   success: z.boolean(),
-  sessionId: z.string(),
+  sessionId: z.string().optional(),
   state: z.string().optional(),
-  monitorUrl: z.string(),
+  monitorUrl: z.string().optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const listSessionsOutputSchema = z.object({
   success: z.boolean(),
-  sessions: z.array(sessionSummaryOutputSchema),
+  sessions: z.array(sessionSummaryOutputSchema).optional(),
   nextPageToken: z.string().optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const sessionStatusOutputSchema = z.object({
   success: z.boolean(),
-  session: sessionDetailsOutputSchema,
+  session: sessionDetailsOutputSchema.optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const manageSessionOutputSchema = z.object({
   success: z.boolean(),
-  action: z.enum(['approve_plan', 'send_message', 'reject_plan']),
+  action: z.enum(['approve_plan', 'send_message', 'reject_plan']).optional(),
   session: sessionDetailsOutputSchema.optional(),
   sessionId: z.string().optional(),
   state: z.string().optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const deleteSessionOutputSchema = z.object({
   success: z.boolean(),
-  sessionId: z.string(),
+  sessionId: z.string().optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const listActivitiesOutputSchema = z.object({
   success: z.boolean(),
-  activities: z.array(activitySummaryOutputSchema),
+  activities: z.array(activitySummaryOutputSchema).optional(),
   nextPageToken: z.string().optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const activityOutputSchema = z.object({
   success: z.boolean(),
-  activity: activityDetailsOutputSchema,
+  activity: activityDetailsOutputSchema.optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const activitiesSinceOutputSchema = z.object({
   success: z.boolean(),
-  sessionId: z.string(),
-  since: z.string(),
-  activities: z.array(activitySummaryOutputSchema),
+  sessionId: z.string().optional(),
+  since: z.string().optional(),
+  activities: z.array(activitySummaryOutputSchema).optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const listSourcesOutputSchema = z.object({
   success: z.boolean(),
-  sources: z.array(sourceOutputSchema),
+  sources: z.array(sourceOutputSchema).optional(),
   nextPageToken: z.string().optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const sourceDetailsOutputSchema = z.object({
   success: z.boolean(),
-  source: sourceOutputSchema,
+  source: sourceOutputSchema.optional(),
+  error: toolErrorSchema.optional(),
 });
 
 const READ_ONLY_ANNOTATIONS = {
@@ -342,9 +369,95 @@ function jsonResult<T extends Record<string, unknown>>(value: T) {
   };
 }
 
-function errorResult(message: string) {
+function extractUpstreamCode(response: unknown): string | number | undefined {
+  if (typeof response !== 'string') return undefined;
+
+  try {
+    const parsed = JSON.parse(response) as {
+      error?: { status?: unknown; code?: unknown };
+    };
+    const status = parsed.error?.status;
+    if (typeof status === 'string' || typeof status === 'number') return status;
+    const code = parsed.error?.code;
+    if (typeof code === 'string' || typeof code === 'number') return code;
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function classifyToolError(error: unknown, fallbackMessage: string) {
+  if (
+    error instanceof Error &&
+    error.message === 'Repository is not authorized for this MCP server.'
+  ) {
+    return {
+      code: 'AUTH_ERROR' as const,
+      message: fallbackMessage,
+      retryable: false,
+    };
+  }
+
+  if (error instanceof JulesAPIError) {
+    const upstreamStatus = error.statusCode;
+    const upstreamCode = extractUpstreamCode(error.response);
+    const message = error.message.toLowerCase();
+
+    let code:
+      | 'AUTH_ERROR'
+      | 'NOT_FOUND'
+      | 'RATE_LIMITED'
+      | 'UPSTREAM_TIMEOUT'
+      | 'JULES_UPSTREAM_ERROR';
+    let retryable = false;
+
+    if (upstreamStatus === 401 || upstreamStatus === 403) {
+      code = 'AUTH_ERROR';
+    } else if (upstreamStatus === 404) {
+      code = 'NOT_FOUND';
+    } else if (upstreamStatus === 429) {
+      code = 'RATE_LIMITED';
+      retryable = true;
+    } else if (
+      upstreamStatus === 408 ||
+      upstreamStatus === 504 ||
+      message.includes('timeout') ||
+      message.includes('aborted')
+    ) {
+      code = 'UPSTREAM_TIMEOUT';
+      retryable = true;
+    } else {
+      code = 'JULES_UPSTREAM_ERROR';
+      retryable = upstreamStatus === undefined || upstreamStatus >= 500;
+    }
+
+    return {
+      code,
+      message: fallbackMessage,
+      retryable,
+      ...(upstreamStatus !== undefined
+        ? { upstream_status: upstreamStatus }
+        : {}),
+      ...(upstreamCode !== undefined ? { upstream_code: upstreamCode } : {}),
+    };
+  }
+
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: message }) }],
+    code: 'RESPONSE_VALIDATION_ERROR' as const,
+    message: fallbackMessage,
+    retryable: false,
+  };
+}
+
+function errorResult(error: unknown, fallbackMessage: string) {
+  const value = {
+    success: false,
+    error: classifyToolError(error, fallbackMessage),
+  };
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(value) }],
+    structuredContent: value,
     isError: true,
   };
 }
@@ -415,8 +528,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           monitorUrl:
             session.url || `https://jules.google.com/sessions/${session.id}`,
         });
-      } catch {
-        return errorResult('Failed to create Jules coding session.');
+      } catch (error) {
+        return errorResult(error, 'Failed to create Jules coding session.');
       }
     }
   );
@@ -442,8 +555,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           monitorUrl:
             session.url || `https://jules.google.com/sessions/${session.id}`,
         });
-      } catch {
-        return errorResult('Failed to create Jules session.');
+      } catch (error) {
+        return errorResult(error, 'Failed to create Jules session.');
       }
     }
   );
@@ -468,8 +581,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           sessions: result.sessions.map(summarizeSession),
           nextPageToken: result.nextPageToken,
         });
-      } catch {
-        return errorResult('Failed to list Jules sessions.');
+      } catch (error) {
+        return errorResult(error, 'Failed to list Jules sessions.');
       }
     }
   );
@@ -487,8 +600,8 @@ export function createJulesMcpServer(env: Env): McpServer {
       try {
         const session = await createJulesClient(env).getSession(session_id);
         return jsonResult({ success: true, session: sessionDetails(session) });
-      } catch {
-        return errorResult('Failed to get Jules session.');
+      } catch (error) {
+        return errorResult(error, 'Failed to get Jules session.');
       }
     }
   );
@@ -514,7 +627,12 @@ export function createJulesMcpServer(env: Env): McpServer {
           });
         }
         if (action === 'send_message') {
-          if (!message) return errorResult('message is required for send_message.');
+          if (!message) {
+            return errorResult(
+              new Error('message is required for send_message.'),
+              'message is required for send_message.'
+            );
+          }
           const session = await client.sendMessage(session_id, { prompt: message });
           return jsonResult({
             success: true,
@@ -530,8 +648,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           sessionId: session_id,
           state: 'CANCELED',
         });
-      } catch {
-        return errorResult('Failed to manage Jules session.');
+      } catch (error) {
+        return errorResult(error, 'Failed to manage Jules session.');
       }
     }
   );
@@ -548,8 +666,8 @@ export function createJulesMcpServer(env: Env): McpServer {
       try {
         await createJulesClient(env).deleteSession(session_id);
         return jsonResult({ success: true, sessionId: session_id });
-      } catch {
-        return errorResult('Failed to delete Jules session.');
+      } catch (error) {
+        return errorResult(error, 'Failed to delete Jules session.');
       }
     }
   );
@@ -579,8 +697,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           activities: result.activities.map(summarizeActivity),
           nextPageToken: result.nextPageToken,
         });
-      } catch {
-        return errorResult('Failed to list Jules activities.');
+      } catch (error) {
+        return errorResult(error, 'Failed to list Jules activities.');
       }
     }
   );
@@ -604,8 +722,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           activity_id
         );
         return jsonResult({ success: true, activity: activityDetails(activity) });
-      } catch {
-        return errorResult('Failed to get Jules activity.');
+      } catch (error) {
+        return errorResult(error, 'Failed to get Jules activity.');
       }
     }
   );
@@ -632,8 +750,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           since,
           activities: result.activities.map(summarizeActivity),
         });
-      } catch {
-        return errorResult('Failed to list recent Jules activities.');
+      } catch (error) {
+        return errorResult(error, 'Failed to list recent Jules activities.');
       }
     }
   );
@@ -657,8 +775,8 @@ export function createJulesMcpServer(env: Env): McpServer {
           sources: result.sources.map(normalizeSource),
           nextPageToken: result.nextPageToken,
         });
-      } catch {
-        return errorResult('Failed to list Jules sources.');
+      } catch (error) {
+        return errorResult(error, 'Failed to list Jules sources.');
       }
     }
   );
@@ -675,8 +793,8 @@ export function createJulesMcpServer(env: Env): McpServer {
       try {
         const source = await createJulesClient(env).getSource(source_name);
         return jsonResult({ success: true, source: normalizeSource(source) });
-      } catch {
-        return errorResult('Failed to get Jules source.');
+      } catch (error) {
+        return errorResult(error, 'Failed to get Jules source.');
       }
     }
   );
