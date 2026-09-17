@@ -32,23 +32,27 @@ export interface JulesClientOptions {
   maxRetries?: number;
 }
 
-type JulesDefaultBranchDto =
+type JulesBranchDto =
   | string
-  | { name?: string }
+  | { name?: string; displayName?: string }
   | null
   | undefined;
 
 /**
- * Raw source DTO returned by Jules. The default branch has appeared in both
- * string and object form, so normalize it before exposing it to the MCP layer.
+ * Raw source DTO returned by Jules. Branches have appeared in legacy string/name
+ * shapes and the current public displayName shape, so normalize all supported
+ * forms before exposing them to the MCP layer.
  */
 interface JulesSourceDto {
   name: string;
+  id?: string;
   githubRepo?: {
     owner: string;
     repo: string;
-    htmlUrl: string;
-    defaultBranch?: JulesDefaultBranchDto;
+    htmlUrl?: string;
+    isPrivate?: boolean;
+    defaultBranch?: JulesBranchDto;
+    branches?: JulesBranchDto[];
   };
 }
 
@@ -57,29 +61,44 @@ interface ListSourcesDto {
   nextPageToken?: string;
 }
 
-function normalizeDefaultBranch(
-  value: JulesDefaultBranchDto
-): string | undefined {
+function normalizeBranchName(value: JulesBranchDto): string | undefined {
   if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && typeof value.name === 'string') {
-    return value.name;
-  }
+  if (!value || typeof value !== 'object') return undefined;
+  if (typeof value.displayName === 'string') return value.displayName;
+  if (typeof value.name === 'string') return value.name;
   return undefined;
+}
+
+function normalizeBranches(values: JulesBranchDto[] | undefined): string[] | undefined {
+  if (!values) return undefined;
+
+  const branches = Array.from(
+    new Set(
+      values
+        .map(normalizeBranchName)
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+  return branches.length > 0 ? branches : undefined;
 }
 
 function normalizeSourceDto(source: JulesSourceDto): Source {
   if (!source.githubRepo) {
-    return { name: source.name };
+    return { name: source.name, id: source.id };
   }
 
-  const defaultBranch = normalizeDefaultBranch(source.githubRepo.defaultBranch);
+  const defaultBranch = normalizeBranchName(source.githubRepo.defaultBranch);
+  const branches = normalizeBranches(source.githubRepo.branches);
   return {
     name: source.name,
+    id: source.id,
     githubRepo: {
       owner: source.githubRepo.owner,
       repo: source.githubRepo.repo,
       htmlUrl: source.githubRepo.htmlUrl,
+      isPrivate: source.githubRepo.isPrivate,
       ...(defaultBranch ? { defaultBranch } : {}),
+      ...(branches ? { branches } : {}),
     },
   };
 }
@@ -376,7 +395,7 @@ export class JulesClient {
       `/sources${this.buildQuery({ pageSize, pageToken })}`
     );
     return {
-      sources: response.sources.map(normalizeSourceDto),
+      sources: (response.sources ?? []).map(normalizeSourceDto),
       nextPageToken: response.nextPageToken,
     };
   }
