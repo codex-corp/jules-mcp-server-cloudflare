@@ -13,6 +13,7 @@ import type {
   ListActivitiesResponse,
   SendMessageRequest,
 } from '../types/jules-api.js';
+import { containsSecret } from '../utils/secret-detection.js';
 
 /**
  * Runtime configuration for the Jules API client.
@@ -24,6 +25,98 @@ export interface JulesClientOptions {
   timeoutMs?: number;
   /** Number of retries after the initial request. */
   maxRetries?: number;
+}
+
+/**
+ * Raw source DTO returned by Jules. The default branch has appeared in both
+ * string and object form, so normalize it before exposing it to the MCP layer.
+ */
+interface JulesSourceDto {
+  name: string;
+  githubRepo?: {
+    owner: string;
+    repo: string;
+    htmlUrl: string;
+    defaultBranch?: string | { name?: string } | null;
+  };
+}
+
+interface ListSourcesDto {
+  sources: JulesSourceDto[];
+  nextPageToken?: string;
+}
+
+function normalizeDefaultBranch(
+  value: JulesSourceDto['githubRepo'] extends infer Repo
+    ? Repo extends { defaultBranch?: infer Branch }
+      ? Branch
+      : never
+    : never
+): string | undefined {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof value.name === 'string') {
+    return value.name;
+  }
+  return undefined;
+}
+
+function normalizeSourceDto(source: JulesSourceDto): Source {
+  if (!source.githubRepo) {
+    return { name: source.name };
+  }
+
+  const defaultBranch = normalizeDefaultBranch(source.githubRepo.defaultBranch);
+  return {
+    name: source.name,
+    githubRepo: {
+      owner: source.githubRepo.owner,
+      repo: source.githubRepo.repo,
+      htmlUrl: source.githubRepo.htmlUrl,
+      ...(defaultBranch ? { defaultBranch } : {}),
+    },
+  };
+}
+
+function parseDiagnosticPayload(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractUpstreamCode(value: unknown): string | number | undefined {
+  const parsed = parseDiagnosticPayload(value);
+  if (!parsed || typeof parsed !== 'object') return undefined;
+
+  const error = (parsed as { error?: unknown }).error;
+  if (!error || typeof error !== 'object') return undefined;
+
+  const status = (error as { status?: unknown }).status;
+  if (typeof status === 'string' || typeof status === 'number') return status;
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' || typeof code === 'number'
+    ? code
+    : undefined;
+}
+
+function safeDiagnosticText(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let text: string;
+  try {
+    text = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch {
+    return '[unserializable diagnostic payload]';
+  }
+
+  const preview = text.length > 500 ? `${text.slice(0, 500)}…` : text;
+  if (containsSecret(preview)) {
+    return '[redacted: potential secret detected]';
+  }
+  return preview;
 }
 
 /**
@@ -99,6 +192,30 @@ export class JulesClient {
 
     const query = searchParams.toString();
     return query ? `?${query}` : '';
+  }
+
+  /**
+   * Logs enough activity API context to diagnose a failed live request without
+   * logging credentials, headers, request bodies, or opaque page-token values.
+   */
+  private logActivityFailure(
+    operation: string,
+    endpoint: string,
+    context: Record<string, string | number | boolean | undefined>,
+    error: unknown
+  ): void {
+    const apiError = error instanceof JulesAPIError ? error : undefined;
+    console.error('[jules-mcp] Jules activity request failed', {
+      operation,
+      endpoint,
+      status: apiError?.statusCode,
+      upstreamCode: extractUpstreamCode(apiError?.response),
+      message: safeDiagnosticText(
+        error instanceof Error ? error.message : error
+      ),
+      responsePreview: safeDiagnosticText(apiError?.response),
+      ...context,
+    });
   }
 
   /**
@@ -285,25 +402,30 @@ export class JulesClient {
    * GET /v1alpha/sources
    * @param pageSize - The maximum number of sources to return (default: 100).
    * @param pageToken - Optional pagination token.
-   * @returns A promise that resolves with the list of sources.
+   * @returns A promise that resolves with the normalized list of sources.
    */
   async listSources(
     pageSize = 100,
     pageToken?: string
   ): Promise<ListSourcesResponse> {
-    return this.request<ListSourcesResponse>(
+    const response = await this.request<ListSourcesDto>(
       `/sources${this.buildQuery({ pageSize, pageToken })}`
     );
+    return {
+      sources: response.sources.map(normalizeSourceDto),
+      nextPageToken: response.nextPageToken,
+    };
   }
 
   /**
    * Get details for a specific source.
    * GET /v1alpha/sources/{name}
    * @param sourceName - The resource name of the source to retrieve.
-   * @returns A promise that resolves with the source details.
+   * @returns A promise that resolves with normalized source details.
    */
   async getSource(sourceName: string): Promise<Source> {
-    return this.request<Source>(`/${sourceName}`);
+    const response = await this.request<JulesSourceDto>(`/${sourceName}`);
+    return normalizeSourceDto(response);
   }
 
   /**
@@ -392,12 +514,24 @@ export class JulesClient {
     pageSize = 50,
     pageToken?: string
   ): Promise<ListActivitiesResponse> {
-    return this.request<ListActivitiesResponse>(
-      `/sessions/${sessionId}/activities${this.buildQuery({
-        pageSize,
-        pageToken,
-      })}`
-    );
+    const endpoint = `/sessions/${sessionId}/activities`;
+    try {
+      return await this.request<ListActivitiesResponse>(
+        `${endpoint}${this.buildQuery({ pageSize, pageToken })}`
+      );
+    } catch (error) {
+      this.logActivityFailure(
+        'listActivities',
+        endpoint,
+        {
+          sessionId,
+          pageSize,
+          hasPageToken: Boolean(pageToken),
+        },
+        error
+      );
+      throw error;
+    }
   }
 
   /**
@@ -408,9 +542,18 @@ export class JulesClient {
    * @returns A promise that resolves with the activity.
    */
   async getActivity(sessionId: string, activityId: string): Promise<Activity> {
-    return this.request<Activity>(
-      `/sessions/${sessionId}/activities/${activityId}`
-    );
+    const endpoint = `/sessions/${sessionId}/activities/${activityId}`;
+    try {
+      return await this.request<Activity>(endpoint);
+    } catch (error) {
+      this.logActivityFailure(
+        'getActivity',
+        endpoint,
+        { sessionId, activityId },
+        error
+      );
+      throw error;
+    }
   }
 
   /**
@@ -426,12 +569,23 @@ export class JulesClient {
     since: string,
     pageSize = 50
   ): Promise<ListActivitiesResponse> {
-    return this.request<ListActivitiesResponse>(
-      `/sessions/${sessionId}/activities${this.buildQuery({
-        pageSize,
-        filter: `createTime>"${since.replace(/"/g, '')}"`,
-      })}`
-    );
+    const endpoint = `/sessions/${sessionId}/activities`;
+    try {
+      return await this.request<ListActivitiesResponse>(
+        `${endpoint}${this.buildQuery({
+          pageSize,
+          filter: `createTime>"${since.replace(/"/g, '')}"`,
+        })}`
+      );
+    } catch (error) {
+      this.logActivityFailure(
+        'listActivitiesSince',
+        endpoint,
+        { sessionId, since, pageSize },
+        error
+      );
+      throw error;
+    }
   }
 
   /**
