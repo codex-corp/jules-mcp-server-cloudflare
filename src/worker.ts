@@ -4,8 +4,9 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 
 import { JulesClient } from './api/jules-client.js';
+import { containsSecret } from './utils/secret-detection.js';
 
-interface Env {
+export interface Env {
   JULES_API_KEY: string;
   JULES_ALLOWED_REPOS?: string;
   JULES_API_TIMEOUT_MS?: string;
@@ -38,7 +39,11 @@ const activityIdSchema = z
   .regex(/^[\w-]+$/, 'Activity ID contains invalid characters');
 
 const createCodingTaskSchema = {
-  prompt: z.string().min(10).max(10000),
+  prompt: z
+    .string()
+    .min(10)
+    .max(10000)
+    .refine((value) => !containsSecret(value), 'Prompt contains potential secrets. Please remove them.'),
   source: sourceNameSchema,
   branch: z
     .string()
@@ -51,14 +56,23 @@ const createCodingTaskSchema = {
 };
 
 const createRepolessTaskSchema = {
-  prompt: z.string().min(10).max(10000),
+  prompt: z
+    .string()
+    .min(10)
+    .max(10000)
+    .refine((value) => !containsSecret(value), 'Prompt contains potential secrets. Please remove them.'),
   title: z.string().max(200).optional(),
 };
 
 const manageSessionSchema = {
   session_id: sessionIdSchema,
   action: z.enum(['approve_plan', 'send_message', 'reject_plan']),
-  message: z.string().min(1).max(5000).optional(),
+  message: z
+    .string()
+    .min(1)
+    .max(5000)
+    .refine((value) => !containsSecret(value), 'Message contains potential secrets. Please remove them.')
+    .optional(),
 };
 
 const paginationSchema = {
@@ -72,11 +86,6 @@ const getActivitiesSinceSchema = {
   page_size: z.number().int().min(1).max(200).default(50),
 };
 
-/**
- * Return a backwards-compatible MCP result with both JSON text and structured data.
- * @param value - JSON object returned by Jules.
- * @returns MCP tool result.
- */
 function jsonResult(value: Record<string, unknown>) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(value) }],
@@ -84,11 +93,6 @@ function jsonResult(value: Record<string, unknown>) {
   };
 }
 
-/**
- * Return a generic error without exposing credentials, upstream bodies, or internals.
- * @param message - Safe error message.
- * @returns MCP error result.
- */
 function errorResult(message: string) {
   const value = { success: false, error: message };
   return {
@@ -98,12 +102,7 @@ function errorResult(message: string) {
   };
 }
 
-/**
- * Enforce the optional repository allowlist using Worker bindings.
- * @param source - Jules source resource name.
- * @param allowlist - Comma-separated owner/repo allowlist.
- */
-function validateRepository(source: string, allowlist?: string): void {
+export function validateRepository(source: string, allowlist?: string): void {
   if (!allowlist) return;
 
   const allowed = allowlist
@@ -119,11 +118,6 @@ function validateRepository(source: string, allowlist?: string): void {
   }
 }
 
-/**
- * Create a request-scoped Jules client from Cloudflare bindings.
- * @param env - Worker bindings.
- * @returns Configured Jules client.
- */
 function createJulesClient(env: Env): JulesClient {
   return new JulesClient({
     apiKey: env.JULES_API_KEY,
@@ -136,12 +130,6 @@ function createJulesClient(env: Env): JulesClient {
   });
 }
 
-/**
- * Register stateless Jules tools for the remote Worker MCP endpoint.
- * Local scheduling and polling are intentionally not exposed in the Worker.
- * @param env - Worker bindings.
- * @returns Fresh MCP server for one stateless request.
- */
 export function createJulesMcpServer(env: Env): McpServer {
   const server = new McpServer({
     name: 'jules-mcp-server-cloudflare',
@@ -413,16 +401,7 @@ export function createJulesMcpServer(env: Env): McpServer {
   return server;
 }
 
-/**
- * Validate Cloudflare Access authentication for the privileged MCP endpoint.
- * Managed OAuth runs at Cloudflare Access; this Worker validates the Access JWT.
- * A localhost-only bypass exists solely for `wrangler dev` and is never enabled
- * by the committed production configuration.
- * @param request - Incoming Worker request.
- * @param env - Worker bindings.
- * @returns True when the request is authorized.
- */
-async function isAuthorized(request: Request, env: Env): Promise<boolean> {
+export async function isAuthorized(request: Request, env: Env): Promise<boolean> {
   const url = new URL(request.url);
   const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
   if (isLocal && env.LOCAL_DEV_BYPASS_AUTH === 'true') return true;
@@ -447,10 +426,7 @@ async function isAuthorized(request: Request, env: Env): Promise<boolean> {
   }
 }
 
-/**
- * Cloudflare Worker entrypoint.
- */
-export default {
+export const worker = {
   async fetch(
     request: Request,
     env: Env,
@@ -494,3 +470,5 @@ export default {
     return handler(request, env, ctx as never);
   },
 };
+
+export default worker;
