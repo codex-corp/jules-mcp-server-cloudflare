@@ -8,6 +8,10 @@ It runs on Cloudflare Workers, exposes Streamable HTTP at `/mcp`, and uses Cloud
 
 > This is an independent open-source project. It is not created, maintained, or endorsed by Google.
 
+## Agent skill
+
+This repository also ships a reusable [`jules-mcp`](skills/jules-mcp/) agent skill. It teaches compatible agents how to delegate engineering work to Jules, poll sessions cheaply, inspect activities, retrieve long-form results losslessly, read artifacts and patches, handle plans and follow-up messages, and validate the MCP runtime with evidence-backed PASS/FAIL/BLOCKED gates.
+
 ## What it provides
 
 - Remote MCP over Streamable HTTP
@@ -56,7 +60,19 @@ You need:
 
 The project is tested in CI with Node 22. npm 10.9.8 hit an Arborist dependency-resolution bug while regenerating this project's lockfile, so npm 11.19.1 is the validated version.
 
-## Install
+## Setup
+
+### Install the agent skill
+
+Install the bundled `jules-mcp` skill with the open agent skills CLI:
+
+```bash
+npx skills add codex-corp/jules-mcp-server-cloudflare --skill jules-mcp
+```
+
+Add `-g` if you want a user-level installation instead of a project-local installation.
+
+### Install the server locally
 
 ```bash
 git clone https://github.com/codex-corp/jules-mcp-server-cloudflare.git

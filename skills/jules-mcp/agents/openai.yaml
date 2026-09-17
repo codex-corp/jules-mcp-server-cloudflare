@@ -1,0 +1,5 @@
+interface:
+  display_name: "Jules MCP"
+  short_description: "Operate and validate Jules engineering sessions through remote MCP."
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
