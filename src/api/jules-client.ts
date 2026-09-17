@@ -4,6 +4,7 @@
  */
 
 import type {
+  Activity,
   Source,
   ListSourcesResponse,
   Session,
@@ -12,6 +13,18 @@ import type {
   ListActivitiesResponse,
   SendMessageRequest,
 } from '../types/jules-api.js';
+
+/**
+ * Runtime configuration for the Jules API client.
+ */
+export interface JulesClientOptions {
+  /** Jules API key. Worker callers should pass this explicitly from a secret binding. */
+  apiKey?: string;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Number of retries after the initial request. */
+  maxRetries?: number;
+}
 
 /**
  * Custom error class for Jules API interactions.
@@ -44,19 +57,30 @@ export class JulesClient {
 
   /**
    * Creates an instance of JulesClient.
-   * @param apiKey - The API key for authentication. If not provided, it falls back to the JULES_API_KEY environment variable.
-   * @throws Error if no API key is provided or found in environment variables.
+   * Node/local callers retain environment-variable fallback behavior. Worker callers
+   * should pass an options object so credentials come from request-scoped bindings.
+   * @param apiKeyOrOptions - API key string or explicit runtime configuration.
+   * @throws Error if no API key is provided or found in the Node environment.
    */
-  constructor(apiKey?: string) {
-    this.apiKey = apiKey || process.env.JULES_API_KEY || '';
+  constructor(apiKeyOrOptions?: string | JulesClientOptions) {
+    const nodeEnv =
+      typeof process !== 'undefined' ? process.env : undefined;
+    const options: JulesClientOptions =
+      typeof apiKeyOrOptions === 'string'
+        ? { apiKey: apiKeyOrOptions }
+        : (apiKeyOrOptions ?? {});
+
+    this.apiKey = options.apiKey || nodeEnv?.JULES_API_KEY || '';
     if (!this.apiKey) {
       throw new Error(
-        'JULES_API_KEY environment variable is required. ' +
-          'Generate a key at https://jules.google/settings'
+        'JULES_API_KEY is required. Generate a key at https://jules.google/settings'
       );
     }
-    this.timeoutMs = Number(process.env.JULES_API_TIMEOUT_MS || 15000);
-    this.maxRetries = Number(process.env.JULES_API_MAX_RETRIES || 2);
+
+    this.timeoutMs =
+      options.timeoutMs ?? Number(nodeEnv?.JULES_API_TIMEOUT_MS || 15000);
+    this.maxRetries =
+      options.maxRetries ?? Number(nodeEnv?.JULES_API_MAX_RETRIES || 2);
   }
 
   /**
@@ -174,7 +198,7 @@ export class JulesClient {
    * Generic HTTP request handler for endpoints that return an empty body (e.g. 204 No Content).
    * @param endpoint - The API endpoint.
    * @param options - Fetch options (method, headers, body, etc.).
-   * @returns A promise resolving to an empty object.
+   * @returns A promise resolving to an empty object or parsed JSON when present.
    */
   private async requestEmpty(
     endpoint: string,
@@ -260,6 +284,7 @@ export class JulesClient {
    * List all connected GitHub repositories.
    * GET /v1alpha/sources
    * @param pageSize - The maximum number of sources to return (default: 100).
+   * @param pageToken - Optional pagination token.
    * @returns A promise that resolves with the list of sources.
    */
   async listSources(
@@ -298,6 +323,7 @@ export class JulesClient {
    * List all sessions with pagination.
    * GET /v1alpha/sessions
    * @param pageSize - The maximum number of sessions to return (default: 20).
+   * @param pageToken - Optional pagination token.
    * @returns A promise that resolves with the list of sessions.
    */
   async listSessions(
@@ -321,32 +347,36 @@ export class JulesClient {
 
   /**
    * Approve the plan for a session in AWAITING_PLAN_APPROVAL state.
-   * POST /v1alpha/sessions/{id}:approvePlan
+   * Jules returns an empty response for approvePlan, so fetch the session afterward
+   * to preserve the existing Session-returning client contract.
    * @param sessionId - The ID of the session to approve the plan for.
-   * @returns A promise that resolves with the updated session.
+   * @returns A promise that resolves with the refreshed session.
    */
   async approvePlan(sessionId: string): Promise<Session> {
-    return this.request<Session>(`/sessions/${sessionId}:approvePlan`, {
+    await this.requestEmpty(`/sessions/${sessionId}:approvePlan`, {
       method: 'POST',
       body: '{}',
     });
+    return this.getSession(sessionId);
   }
 
   /**
    * Send feedback message to an active session.
-   * POST /v1alpha/sessions/{id}:sendMessage
+   * Jules returns an empty response for sendMessage, so fetch the session afterward
+   * to preserve the existing Session-returning client contract.
    * @param sessionId - The ID of the session to send the message to.
    * @param request - The request body containing the message prompt.
-   * @returns A promise that resolves with the updated session.
+   * @returns A promise that resolves with the refreshed session.
    */
   async sendMessage(
     sessionId: string,
     request: SendMessageRequest
   ): Promise<Session> {
-    return this.request<Session>(`/sessions/${sessionId}:sendMessage`, {
+    await this.requestEmpty(`/sessions/${sessionId}:sendMessage`, {
       method: 'POST',
       body: JSON.stringify(request),
     });
+    return this.getSession(sessionId);
   }
 
   /**
@@ -354,6 +384,7 @@ export class JulesClient {
    * GET /v1alpha/sessions/{id}/activities
    * @param sessionId - The ID of the session to list activities for.
    * @param pageSize - The maximum number of activities to return (default: 50).
+   * @param pageToken - Optional pagination token.
    * @returns A promise that resolves with the list of activities.
    */
   async listActivities(
@@ -366,6 +397,19 @@ export class JulesClient {
         pageSize,
         pageToken,
       })}`
+    );
+  }
+
+  /**
+   * Get one activity from a Jules session.
+   * GET /v1alpha/sessions/{session}/activities/{activity}
+   * @param sessionId - The owning session ID.
+   * @param activityId - The activity ID.
+   * @returns A promise that resolves with the activity.
+   */
+  async getActivity(sessionId: string, activityId: string): Promise<Activity> {
+    return this.request<Activity>(
+      `/sessions/${sessionId}/activities/${activityId}`
     );
   }
 
@@ -391,8 +435,7 @@ export class JulesClient {
   }
 
   /**
-   * Delete or cancel a session.
-   * DELETE /v1alpha/sessions/{id}
+   * Delete or cancel a session using the legacy endpoint expected by this project.
    * @param sessionId - The ID of the session to delete.
    * @returns A promise that resolves with the empty response.
    */
@@ -403,8 +446,7 @@ export class JulesClient {
   }
 
   /**
-   * Reject the currently proposed plan for a session.
-   * DELETE /v1alpha/sessions/{id}
+   * Reject the currently proposed plan using the legacy cancellation behavior.
    * @param sessionId - The ID of the session whose plan should be rejected.
    * @returns A promise that resolves with the empty response.
    */
