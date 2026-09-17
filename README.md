@@ -24,7 +24,7 @@ Remote Worker tools:
 | --- | --- |
 | Create | `create_coding_task`, `create_repoless_task` |
 | Sessions | `list_sessions`, `get_session_status`, `get_session_details`, `manage_session`, `delete_session` |
-| Activities | `list_activities`, `get_activity`, `get_activities_since` |
+| Activities | `list_activities`, `get_activity`, `get_activity_artifacts`, `get_activity_patch`, `get_activities_since` |
 | Sources | `list_sources`, `get_source_details` |
 
 All remote tools advertise an MCP `outputSchema` so clients such as ChatGPT can consume structured results. List tools return compact summaries instead of forwarding raw Jules payloads or large code patches; use the focused `get_*` tools when you need details for one item.
@@ -32,6 +32,10 @@ All remote tools advertise an MCP `outputSchema` so clients such as ChatGPT can 
 `manage_session` supports plan approval and session messaging. Session deletion is exposed separately through the explicitly destructive `delete_session` tool.
 
 All remote list-style inputs follow the Jules API maximum page size of 100. `get_activities_since` returns `hasMore` and an opaque `nextCursor` when more matching activities remain, so bounded polling does not silently discard later matches.
+
+Source resource names are treated as Jules resource identifiers rather than parsed as repository identity. `list_sources` stays compact, while `get_source_details` can return the normalized source id, repository owner/name, privacy flag, default branch, and up to 100 active branch display names. When `JULES_ALLOWED_REPOS` is enabled, task creation resolves the source through Jules and validates the returned GitHub owner/repository pair against the allowlist.
+
+Activity list and detail calls do not return raw code patches, full command output, or embedded media bytes. `get_activity_artifacts` returns bounded artifact metadata, changed-file names, command-output previews, and media metadata. Raw code patches are available only through the explicit `get_activity_patch` tool, which returns bounded chunks and continuation offsets. Embedded media data is never returned by the remote MCP surface.
 
 The remote Worker intentionally does not expose the local scheduler or polling/wait tools.
 
@@ -233,7 +237,9 @@ Open the localhost URL printed by Inspector in your Windows browser, complete th
 - `/mcp` requires a valid Cloudflare Access JWT.
 - The Worker validates both the Access issuer (`TEAM_DOMAIN`) and application audience (`POLICY_AUD`).
 - Prompts and messages that look like secrets are rejected before they reach Jules.
-- `JULES_ALLOWED_REPOS` can limit which repositories may receive new coding tasks.
+- `JULES_ALLOWED_REPOS` can limit which repositories may receive new coding tasks; authorization uses the GitHub owner/repository identity returned by Jules rather than trusting the source resource-name text.
+- Raw activity patches and full command output are excluded from list/detail tools; patch retrieval requires the explicit chunked `get_activity_patch` tool.
+- Embedded media bytes are not exposed through the remote MCP tools.
 - The Worker keeps no session state, token database, queue, or local schedule storage.
 
 ## Development checks
