@@ -37,7 +37,7 @@ const activityIdSchema = z
   .string()
   .regex(/^[\w-]+$/, 'Activity ID contains invalid characters');
 
-const createCodingTaskSchema = z.object({
+const createCodingTaskSchema = {
   prompt: z.string().min(10).max(10000),
   source: sourceNameSchema,
   branch: z
@@ -48,29 +48,29 @@ const createCodingTaskSchema = z.object({
   auto_create_pr: z.boolean().default(true),
   require_plan_approval: z.boolean().default(false),
   title: z.string().max(200).optional(),
-});
+};
 
-const createRepolessTaskSchema = z.object({
+const createRepolessTaskSchema = {
   prompt: z.string().min(10).max(10000),
   title: z.string().max(200).optional(),
-});
+};
 
-const manageSessionSchema = z.object({
+const manageSessionSchema = {
   session_id: sessionIdSchema,
   action: z.enum(['approve_plan', 'send_message', 'reject_plan']),
   message: z.string().min(1).max(5000).optional(),
-});
+};
 
-const paginationSchema = z.object({
+const paginationSchema = {
   page_size: z.number().int().min(1).max(200).default(50),
   page_token: z.string().optional(),
-});
+};
 
-const getActivitiesSinceSchema = z.object({
+const getActivitiesSinceSchema = {
   session_id: sessionIdSchema,
   since: z.string().datetime({ offset: true }),
   page_size: z.number().int().min(1).max(200).default(50),
-});
+};
 
 /**
  * Return a backwards-compatible MCP result with both JSON text and structured data.
@@ -236,7 +236,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_session_status',
     {
       description: 'Get the current state and details of a Jules session.',
-      inputSchema: z.object({ session_id: sessionIdSchema }),
+      inputSchema: { session_id: sessionIdSchema },
     },
     async ({ session_id }) => {
       try {
@@ -269,7 +269,11 @@ export function createJulesMcpServer(env: Env): McpServer {
         }
 
         await client.rejectPlan(session_id);
-        return jsonResult({ success: true, sessionId: session_id, state: 'CANCELED' });
+        return jsonResult({
+          success: true,
+          sessionId: session_id,
+          state: 'CANCELED',
+        });
       } catch {
         return errorResult('Failed to manage Jules session.');
       }
@@ -280,7 +284,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'delete_session',
     {
       description: 'Delete or cancel a Jules session.',
-      inputSchema: z.object({ session_id: sessionIdSchema }),
+      inputSchema: { session_id: sessionIdSchema },
     },
     async ({ session_id }) => {
       try {
@@ -296,11 +300,11 @@ export function createJulesMcpServer(env: Env): McpServer {
     'list_activities',
     {
       description: 'List activities for a Jules session.',
-      inputSchema: z.object({
+      inputSchema: {
         session_id: sessionIdSchema,
         page_size: z.number().int().min(1).max(200).default(50),
         page_token: z.string().optional(),
-      }),
+      },
     },
     async ({ session_id, page_size, page_token }) => {
       try {
@@ -324,10 +328,10 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_activity',
     {
       description: 'Get one activity from a Jules session.',
-      inputSchema: z.object({
+      inputSchema: {
         session_id: sessionIdSchema,
         activity_id: activityIdSchema,
-      }),
+      },
     },
     async ({ session_id, activity_id }) => {
       try {
@@ -394,7 +398,7 @@ export function createJulesMcpServer(env: Env): McpServer {
     'get_source_details',
     {
       description: 'Get details for a repository source connected to Jules.',
-      inputSchema: z.object({ source_name: sourceNameSchema }),
+      inputSchema: { source_name: sourceNameSchema },
     },
     async ({ source_name }) => {
       try {
