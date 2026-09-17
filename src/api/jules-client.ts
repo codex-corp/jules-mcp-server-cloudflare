@@ -27,6 +27,12 @@ export interface JulesClientOptions {
   maxRetries?: number;
 }
 
+type JulesDefaultBranchDto =
+  | string
+  | { name?: string }
+  | null
+  | undefined;
+
 /**
  * Raw source DTO returned by Jules. The default branch has appeared in both
  * string and object form, so normalize it before exposing it to the MCP layer.
@@ -37,7 +43,7 @@ interface JulesSourceDto {
     owner: string;
     repo: string;
     htmlUrl: string;
-    defaultBranch?: string | { name?: string } | null;
+    defaultBranch?: JulesDefaultBranchDto;
   };
 }
 
@@ -47,11 +53,7 @@ interface ListSourcesDto {
 }
 
 function normalizeDefaultBranch(
-  value: JulesSourceDto['githubRepo'] extends infer Repo
-    ? Repo extends { defaultBranch?: infer Branch }
-      ? Branch
-      : never
-    : never
+  value: JulesDefaultBranchDto
 ): string | undefined {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && typeof value.name === 'string') {
